@@ -1,0 +1,6 @@
+// VariablePayload.idl
+struct VariablePayload {
+    // octet은 C++에서 uint8_t로 변환되며, 
+    // sequence는 가변 길이 배열(std::vector)로 변환됩니다.
+    sequence<octet, 1048576> data;
+};
