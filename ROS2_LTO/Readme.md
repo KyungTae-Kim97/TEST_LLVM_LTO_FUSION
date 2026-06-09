@@ -36,12 +36,6 @@ By replacing the standard encoding/decoding functions with inline, hardware-acce
 * **`fastddsgen.jar`**
   The eProsima Fast DDS code generator used to compile the IDL specifications into the necessary C++ structures.
   
-
-##  Key Differentiator: Standard RTPS vs. Zero-Copy
-Unlike Zero-Copy (Data-Sharing) architectures that are strictly limited to intra-host (IPC) communication via `/dev/shm`, this implementation optimizes the **Standard RTPS over UDP/TCP payload pipeline**. 
-* **Universal Compatibility:** Works seamlessly across physical networks (Wi-Fi, Ethernet) for multi-robot fleets.
-* **Drop-in Replacement:** Requires zero modifications to the ROS2 application layer; the performance gains are achieved entirely at link-time (LTO) and hardware-execution levels.
-
 ---
 
 ##  Performance & Optimization Highlights (Jetson Orin Nano)
