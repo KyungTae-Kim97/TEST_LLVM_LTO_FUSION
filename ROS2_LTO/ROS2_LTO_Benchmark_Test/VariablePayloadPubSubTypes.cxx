@@ -25,14 +25,14 @@
 
 #include "VariablePayloadPubSubTypes.h"
 
-// 💡 1. LLVM이 후킹할 타겟 함수 (다시 부활!)
+// Target function intended for LLVM hooking hooks.
 /*void FastCdr_serialize_memcpy(void* src, void* dest, size_t len) {
     std::memcpy(dest, src, len); 
 }
 */
 __attribute__((noinline))
 void FastCdr_serialize_memcpy(void* src, void* dest, size_t len) {
-    // LLVM Pass가 이 루프나 memcpy를 가로채서 AES로 바꿔야 합니다.
+    // The LLVM Pass intercepts either this loop structure or memcpy directly to switch execution to AES routines.
     std::memcpy(dest, src, len); 
 }
 
@@ -69,40 +69,38 @@ bool VariablePayloadPubSubType::serialize(void* data, eprosima::fastrtps::rtps::
     uint64_t func_ptr = reinterpret_cast<uint64_t>(&FastCdr_serialize_memcpy);
     uint64_t raw_data_ptr = reinterpret_cast<uint64_t>(vp->data().data());
 
-    // 데이터 복사는 단 24바이트만 수행 (Zero-Copy 유지!)
+    // Copy metadata block strictly restricted to 24 bytes to preserve Zero-Copy design guarantees.
     std::memcpy(payload->data, &is_thunk_flag, 4);
     std::memcpy(payload->data + 4, &real_size, 4);
     std::memcpy(payload->data + 8, &func_ptr, 8);
     std::memcpy(payload->data + 16, &raw_data_ptr, 8);
 
-    // 미들웨어가 넉넉한 전송 버퍼를 할당하도록 실제 데이터 크기를 알려줍니다!
+    // Provide the framework middleware with the expected size tracking bounds to safely instantiate transmission buffer slots.
     payload->length = real_size + 24; 
-
 
     return true; 
 }
 
-// 💡 [수신부 RX] Zero-Copy TX 구조에 맞춘 수신부 업데이트
+// [Receiver RX] Updated receiver path to conform with the customized Zero-Copy TX serialization protocol.
 bool VariablePayloadPubSubType::deserialize(eprosima::fastrtps::rtps::SerializedPayload_t* payload, void* data) {
     VariablePayload* vp = static_cast<VariablePayload*>(data);
 
-    // RX Crypto 플러그인이 이미 모든 헤더와 태그를 제거했습니다.
-    // payload->length는 복호화된 '순수 원본 센서 데이터의 크기'와 완벽히 일치합니다!
+    // The RX Crypto plugin layer has successfully filtered out all internal framework headers and MAC tags.
+    // payload->length corresponds perfectly to the actual decrypted raw sensor data size bounds.
     uint32_t real_size = payload->length;
     
-
     if (real_size == 0) return false;
 
-    // 벡터 크기를 맞추고
+    // Standardize vector allocations matching real size requirements.
     vp->data().resize(real_size);
     
-    // 헤더 건너뛸 필요 없이, 0번지부터 그대로 복사하면 끝입니다!
+    // Direct memory copy mapped cleanly from offset 0; skipping manual header tracking offsets entirely.
     std::memcpy(vp->data().data(), payload->data, real_size);
     
     return true;
 }
 
-// 💡 4. 사이즈 제공자 (Twist의 리턴 방식과 동일하게)
+// Size Provider implementation matching downstream application-side requirements.
 std::function<uint32_t()> VariablePayloadPubSubType::getSerializedSizeProvider(void* data) {
     return [data]() -> uint32_t {
         VariablePayload* vp = static_cast<VariablePayload*>(data);

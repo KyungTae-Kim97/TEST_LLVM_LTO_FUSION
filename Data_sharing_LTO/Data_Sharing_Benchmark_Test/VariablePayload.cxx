@@ -35,14 +35,14 @@ using namespace eprosima::fastcdr::exception;
 #include <utility>
 
 // =================================================================
-// 🎯 1. 스나이퍼 타겟 함수 선언 (파일 최상단 부근에 추가)
+// 1. Sniper Target Function Declarations (Added near the top of file)
 // =================================================================
 extern "C" __attribute__((noinline, used))
 void FastCdr_serialize_memcpy(void* src, void* dest, size_t len) {
     std::memcpy(dest, src, len);
 }
 
-// 🎯 [새로 추가할 RX 타겟 함수]
+// [Newly Added RX Target Function]
 extern "C" __attribute__((noinline, used))
 void FastCdr_deserialize_memcpy(void* src, void* dest, size_t len) {
     std::memcpy(dest, src, len);
@@ -51,8 +51,6 @@ void FastCdr_deserialize_memcpy(void* src, void* dest, size_t len) {
 VariablePayload::VariablePayload()
 {
     // m_data com.eprosima.idl.parser.typecode.SequenceTypeCode@74ad1f1f
-
-
 }
 
 VariablePayload::~VariablePayload()
@@ -74,25 +72,20 @@ VariablePayload::VariablePayload(
 VariablePayload& VariablePayload::operator =(
         const VariablePayload& x)
 {
-
     m_data = x.m_data;
-
     return *this;
 }
 
 VariablePayload& VariablePayload::operator =(
         VariablePayload&& x)
 {
-
     m_data = std::move(x.m_data);
-
     return *this;
 }
 
 bool VariablePayload::operator ==(
         const VariablePayload& x) const
 {
-
     return (m_data == x.m_data);
 }
 
@@ -107,12 +100,8 @@ size_t VariablePayload::getMaxCdrSerializedSize(
 {
     size_t initial_alignment = current_alignment;
 
-
     current_alignment += 4 + eprosima::fastcdr::Cdr::alignment(current_alignment, 4);
-
     current_alignment += (1048576 * 1) + eprosima::fastcdr::Cdr::alignment(current_alignment, 1);
-
-
 
     return current_alignment - initial_alignment;
 }
@@ -124,15 +113,12 @@ size_t VariablePayload::getCdrSerializedSize(
     (void)data;
     size_t initial_alignment = current_alignment;
 
-
     current_alignment += 4 + eprosima::fastcdr::Cdr::alignment(current_alignment, 4);
 
     if (data.data().size() > 0)
     {
         current_alignment += (data.data().size() * 1) + eprosima::fastcdr::Cdr::alignment(current_alignment, 1);
     }
-
-
 
     return current_alignment - initial_alignment;
 }
@@ -141,32 +127,32 @@ void VariablePayload::serialize(
         eprosima::fastcdr::Cdr& scdr) const
 {
     // =================================================================
-    // 🚀 [거대 페이로드 다이렉트 암호화 직렬화 시작]
+    // [Large Payload Direct Encrypted Serialization Start]
     // =================================================================
     
-    // Fast-CDR 규칙: 가변 배열(Vector 등)을 직렬화할 때는 크기를 먼저 적습니다.
-    // 참고: fastddsgen 설정에 따라 m_data 대신 m_data() 함수를 써야 할 수도 있습니다.
+    // Fast-CDR rule: When serializing a variable array (Vector, etc.), write the size first.
+    // Note: Depending on fastddsgen configuration, you might need to use m_data() instead of m_data directly.
     uint32_t data_size = static_cast<uint32_t>(m_data.size());
     scdr << data_size; 
-	
+    
     if (data_size > 0) {
-        // Cdr 객체에서 현재 버퍼의 포인터(SHM 주소)를 꺼냅니다.
+        // Extract the pointer of the current buffer (SHM destination address) from the Cdr object.
         void* dest_shm_ptr = reinterpret_cast<void*>(scdr.getCurrentPosition());
         
-        // 원본 로컬 데이터의 포인터를 꺼냅니다.
+        // Extract the pointer of the raw local source data.
         void* src_data_ptr = reinterpret_cast<void*>(const_cast<uint8_t*>(m_data.data()));
         
-        // 복사할 총 바이트 길이 계산
+        // Calculate the total byte length to copy
         size_t byte_length = data_size * sizeof(uint8_t);
 
-        // 🎯 LLVM 스나이퍼 타겟 호출! (여기서 암호문 + MAC 16바이트가 dest에 쓰여집니다)
+        // Call the LLVM Sniper Target! (This is where the ciphertext + 16-byte MAC are written to dest)
         FastCdr_serialize_memcpy(src_data_ptr, dest_shm_ptr, byte_length);
 
-        // 💡 [핵심 수정] 원본 byte_length에 MAC 태그 크기(16바이트)를 더해서 점프합니다!
-        // 이렇게 해야 FastDDS가 SHM 블록을 정상적인 크기로 인식합니다.
-        // 💡 원본 길이 + 24바이트(MAC 16 + IV 8) 점프
+        // [Core Modification] Jump ahead by the original byte_length plus the MAC tag size (16 bytes) and IV (8 bytes).
+        // This ensures FastDDS properly registers the overall layout block size in shared memory.
+        // Advance buffer position: original length + 24 bytes (16-byte MAC + 8-byte IV)
         if (!scdr.jump(byte_length + 24)) {
-            printf("[ERROR] 직렬화 버퍼 오버플로우 발생!\n");
+            printf("[ERROR] Serialization buffer overflow occurred!\n");
         }
     }
 }
@@ -174,35 +160,34 @@ void VariablePayload::serialize(
 void VariablePayload::deserialize(
         eprosima::fastcdr::Cdr& dcdr)
 {
-    // dcdr >> m_header; // (IDL에 header가 있다면 유지)
+    // dcdr >> m_header; // (Retain if m_header is declared within the IDL structure)
 
     uint32_t data_size;
-    dcdr >> data_size; // 배열 크기 읽기 (TX에서 평문으로 보냈으므로 정상적으로 읽힘)
+    dcdr >> data_size; // Read array size (Successfully processed since TX sent this field as plaintext)
     
-    // 로컬 메모리 공간 확보
+    // Allocate space in the local memory heap
     m_data.resize(data_size);
 
     if (data_size > 0) {
-        // 💡 SHM에 들어있는 '암호문'의 주소 (src)
+        // Address of the incoming ciphertext residing in Shared Memory (src)
         void* src_shm_ptr = reinterpret_cast<void*>(dcdr.getCurrentPosition());
         
-        // 💡 애플리케이션의 로컬 힙 메모리 주소 (dest)
+        // Destination address pointing to the application's local heap memory (dest)
         void* dest_data_ptr = reinterpret_cast<void*>(m_data.data());
         
         size_t byte_length = data_size * sizeof(uint8_t);
 
-        // 🎯 수신측 스나이퍼 타겟 호출! (LTO가 복호화로 바꿔치기할 예정)
+        // Call the receiver-side Sniper Target! (LTO will hot-swap this call with the inline decryption routines)
         FastCdr_deserialize_memcpy(src_shm_ptr, dest_data_ptr, byte_length);
 
-        // 💡 [핵심 수정] 송신부와 동일하게 원본 길이 + 16바이트(MAC)만큼 점프!
-        // 💡 수신부도 동일하게 원본 길이 + 24바이트 점프
+        // [Core Modification] Match the transmitter-side padding constraints by jumping forward.
+        // Receiver buffer advancement constraint: original byte length + 24 bytes
         if (!dcdr.jump(byte_length + 24)) {
-            printf("[ERROR] 역직렬화 버퍼 오버플로우 발생!\n");
+            printf("[ERROR] Deserialization buffer overflow occurred!\n");
             return;
         }
     }
 }
-
 
 /*!
  * @brief This function copies the value in member data
@@ -246,9 +231,6 @@ size_t VariablePayload::getKeyMaxCdrSerializedSize(
         size_t current_alignment)
 {
     size_t current_align = current_alignment;
-
-
-
     return current_align;
 }
 
@@ -261,5 +243,4 @@ void VariablePayload::serializeKey(
         eprosima::fastcdr::Cdr& scdr) const
 {
     (void) scdr;
-     
 }

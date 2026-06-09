@@ -8,7 +8,7 @@
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
 #include <fastrtps/rtps/attributes/PropertyPolicy.h>
 
-// 새로 생성한 가변 페이로드 헤더 인클루드
+// Include the newly created variable payload header
 #include "VariablePayloadPubSubTypes.h"
 #include "VariablePayload.h"
 
@@ -23,7 +23,7 @@
 using namespace eprosima::fastdds::dds;
 using namespace eprosima::fastrtps::rtps;
 
-// 벤치마크 결과를 저장할 구조체
+// Structure to store benchmark results
 struct BenchResult {
     size_t size;
     double throughput;
@@ -38,8 +38,7 @@ public:
         VariablePayload msg;
         SampleInfo info;
         if (reader->take_next_sample(&msg, &info) == ReturnCode_t::RETCODE_OK && info.valid_data) {
-            // 수신 확인용 (성능에 영향을 주지 않도록 크기만 출력하거나 주석 처리 권장)
-            // std::cout << "[RX] Received data size: " << msg.data().size() << " bytes\n";
+            
         }
     }
 };
@@ -52,7 +51,7 @@ int main(int argc, char** argv) {
     pqos.name(mode == "publisher" ? "ScalePub" : "ScaleSub");
     PropertyPolicy& props = pqos.properties();
 
-    // SROS2 플러그인 로드 (기존과 동일)
+    // Load SROS2 plugins (Identical to previous configuration)
     props.properties().emplace_back("dds.sec.auth.plugin", "builtin.PKI-DH");
     props.properties().emplace_back("dds.sec.access.plugin", "builtin.Access-Permissions");
     props.properties().emplace_back("dds.sec.crypto.plugin", "builtin.AES-GCM-GMAC");
@@ -68,21 +67,9 @@ int main(int argc, char** argv) {
     props.properties().emplace_back("dds.sec.access.builtin.Access-Permissions.governance", "file://" + cert_dir + "governance.p7s");
     props.properties().emplace_back("dds.sec.access.builtin.Access-Permissions.permissions", "file://" + cert_dir + "permissions.p7s");
 
-//  FastDDS 자체가 원래(By design) 1차(Payload)와 2차(Message)에 걸쳐 이중 암호화를 수행하도록 기본 설정이 되어 있었던 것입니다.
-//  이 현상을 막고 LTO 퓨전의 진정한 성능을 끌어내려면, 이전 답변에서 말씀드린 대로 QoS 설정에서 RTPS Message 보호 수준을 낮춰야 합니다.
-    props.properties().emplace_back("rtps.protection_kind", "SIGN"); // 또는 "NONE"
-    props.properties().emplace_back("rtps.payload.protection_kind", "ENCRYPT");
-//
-	
     DomainParticipant* participant = DomainParticipantFactory::get_instance()->create_participant(0, pqos);
 
     TypeSupport type(new VariablePayloadPubSubType());
-    
-    // 💡 [핵심 해결책] Data-Sharing 공유 메모리 청크(방) 크기를 강제로 확장!
-    // 미들웨어가 기본적으로 약 1MB로 잡혀있던 한계치를 5MB로 넉넉하게 늘려줍니다.
-    // 2MB(2048KB) 데이터 + 헤더 + MAC(16) + IV(8)가 모두 들어가고도 남습니다.
-    type->m_typeSize = 5 * 1024 * 1024;
-    
     type.register_type(participant);
     Topic* topic = participant->create_topic("rt/TwistTopic", type.get_type_name(), TOPIC_QOS_DEFAULT);
 
@@ -90,38 +77,40 @@ int main(int argc, char** argv) {
         Publisher* pub = participant->create_publisher(PUBLISHER_QOS_DEFAULT);
         DataWriter* writer = pub->create_datawriter(topic, DATAWRITER_QOS_DEFAULT);
         
-        std::cout << "🚀 Starting Payload Scaling Benchmark..." << std::endl;
-        std::cout << "⏳ Waiting 3 seconds for SROS2 Handshake..." << std::endl;
+        std::cout << "Starting Payload Scaling Benchmark..." << std::endl;
+        std::cout << "Waiting 3 seconds for SROS2 Handshake..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(3)); 
 
-        // 💡 벤치마크할 데이터 크기 배열 (64 ~ 4MB)
-        std::vector<size_t> sizes = {1024 * 64, 1024 * 128, 1024 * 256, 1024 * 512, 1024 * 1024 * 1, 1024 * 1024 * 2, 1024 * 1024 * 4 };
+        // Array of payload sizes to benchmark (48 Bytes to 32 KB)
+        // std::vector<size_t> sizes = { 48, 64, 128, 256, 512, 1024, 2048, 4096};
+        std::vector<size_t> sizes = { 48, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 16384*2};
         std::vector<BenchResult> all_results;
         
-        const int WARMUP_ITERS = 100;
-        const int BENCHMARK_ITERS = 1000; // 큰 데이터의 경우 반복 횟수 조정 필요
+        const int WARMUP_ITERS = 500;
+        const int BENCHMARK_ITERS = 10000; // Total iterations can be adjusted for large payloads if necessary
 
         VariablePayload msg;
 
         for (size_t current_size : sizes) {
-            //std::cout << "\n=========================================================\n";
-            std::cout << " 📐 Testing Payload Size: " << current_size << " Bytes (" << current_size / 1024 << " KB)\n";
-            //std::cout << "=========================================================\n";
+            std::cout << "\n=========================================================\n";
+            std::cout << " Testing Payload Size: " << current_size << " Bytes (" << current_size / 1024 << " KB)\n";
+            std::cout << "=========================================================\n";
 
-            // 페이로드 크기 할당 및 더미 데이터 초기화
+            // Allocate payload size and initialize with dummy data
             msg.data().resize(current_size);
             std::fill(msg.data().begin(), msg.data().end(), 0xAA); 
 
             std::vector<double> latencies;
             latencies.reserve(BENCHMARK_ITERS);
 
-            //std::cout << "🔥 Warming up..." << std::endl;
+            std::cout << "Warming up..." << std::endl;
             for (int i = 0; i < WARMUP_ITERS; ++i) {
                 writer->write(&msg);
-                std::this_thread::sleep_for(std::chrono::milliseconds(10)); 
             }
 
-            //std::cout << "⏱️ Measuring Latency..." << std::endl;
+            std::cout << "Measuring Latency..." << std::endl;
+            auto start_total = std::chrono::high_resolution_clock::now();
+
             for (int i = 0; i < BENCHMARK_ITERS; ++i) {
                 auto t1 = std::chrono::high_resolution_clock::now();
                 writer->write(&msg);
@@ -129,47 +118,41 @@ int main(int argc, char** argv) {
 
                 std::chrono::duration<double, std::nano> diff = t2 - t1;
                 latencies.push_back(diff.count());
-
-                // 수신부 처리를 위한 대기 (레이턴시 측정에는 포함되지 않음)
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            // auto end_total = std::chrono::high_resolution_clock::now(); // 💡 전체 타이머 제거
+            auto end_total = std::chrono::high_resolution_clock::now();
 
-            // 통계 계산
+            // Calculate statistics
             std::sort(latencies.begin(), latencies.end());
             double p50 = latencies[BENCHMARK_ITERS * 0.50];
             double p99 = latencies[BENCHMARK_ITERS * 0.99];
             
-            // 평균(Average) 계산 및 순수 처리 시간(Sum) 산출
-            double sum_ns = std::accumulate(latencies.begin(), latencies.end(), 0.0);
-            double avg = sum_ns / latencies.size();
+            // Calculate Average Latency (Utilizing std::accumulate)
+            double sum = std::accumulate(latencies.begin(), latencies.end(), 0.0);
+            double avg = sum / latencies.size();
 
-            // 💡 [핵심 수정] 수면 시간(sleep)을 완전히 배제하고, 순수 CPU 처리 시간의 합으로 Throughput 계산
-            double total_active_sec = sum_ns / 1e9; // 나노초(ns) -> 초(s) 변환
-            
-            // 처리량 방어 코드 (0으로 나누기 방지)
-            double throughput = (total_active_sec > 0.0) ? (BENCHMARK_ITERS / total_active_sec) : 0.0;
+            std::chrono::duration<double> total_sec = end_total - start_total;
+            double throughput = BENCHMARK_ITERS / total_sec.count();
 
             std::cout << " - Throughput: " << throughput << " msgs/sec\n";
             std::cout << " - Average: " << avg << " ns\n"; 
             std::cout << " - Median (P50): " << p50 << " ns\n";
             std::cout << " - Tail (P99): " << p99 << " ns\n";
 
-            // 결과 저장
+            // Store measurement results
             all_results.push_back({current_size, throughput, avg, p50, p99});
             
-            // 시스템 안정화를 위한 짧은 대기
+            // Short delay to allow system stabilization
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
         // =========================================================================
-        // 📊 최종 논문용 테이블 출력
+        // Final Benchmark Results Table (Optimized for Paper/Thesis Output)
         // =========================================================================
-        std::cout << "\n\n🏆 [Final Benchmark Results Table]\n";
+        std::cout << "\n\n [Final Benchmark Results Table]\n";
         std::cout << "---------------------------------------------------------------------------------------------\n";
         std::cout << std::setw(15) << "Payload (Bytes)" 
                   << std::setw(20) << "Throughput (msg/s)" 
-                  << std::setw(20) << "Avg Latency (ns)"   // 💡 추가됨
+                  << std::setw(20) << "Avg Latency (ns)"   
                   << std::setw(20) << "P50 Latency (ns)" 
                   << std::setw(20) << "P99 Latency (ns)" << "\n";
         std::cout << "---------------------------------------------------------------------------------------------\n";
@@ -178,12 +161,12 @@ int main(int argc, char** argv) {
             std::cout << std::fixed << std::setprecision(2);
             std::cout << std::setw(15) << res.size 
                       << std::setw(20) << res.throughput 
-                      << std::setw(20) << res.avg          // 💡 추가됨
+                      << std::setw(20) << res.avg          
                       << std::setw(20) << res.p50 
                       << std::setw(20) << res.p99 << "\n";
         }
         std::cout << "---------------------------------------------------------------------------\n";
-        std::cout << "✅ Benchmark finished. Press Ctrl+C to exit." << std::endl;
+        std::cout << "Benchmark finished. Press Ctrl+C to exit." << std::endl;
         while(true) { std::this_thread::sleep_for(std::chrono::seconds(1)); }
         
     } else {
@@ -191,7 +174,7 @@ int main(int argc, char** argv) {
         SubListener* listener = new SubListener();
         sub->create_datareader(topic, DATAREADER_QOS_DEFAULT, listener);
         
-        std::cout << "🎧 Listening for VariablePayload messages..." << std::endl;
+        std::cout << "Listening for VariablePayload messages..." << std::endl;
         while(true) { std::this_thread::sleep_for(std::chrono::seconds(1)); }
     }
     return 0;

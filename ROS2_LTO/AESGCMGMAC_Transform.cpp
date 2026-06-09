@@ -69,16 +69,12 @@ AESGCMGMAC_Transform::~AESGCMGMAC_Transform()
 {
 }
 
-// 💡 상단에 LTO 융합 엔진 함수들을 미리 선언해 둡니다. (LLVM Pass가 링크 타임에 연결함)
+// Declare LTO fusion engine functions in advance (The LLVM Pass links them at link-time).
 extern "C" void fuse_init(const uint8_t* key, const uint8_t* iv);
-
-// 💡 [추가됨] AAD(SecureDataHeader) 주입 및 추가 데이터 처리를 위한 업데이트 함수
-extern "C" void fuse_update_enc(const uint8_t* src, uint8_t* dest, size_t len); 
 
 extern "C" void fuse_finalize_enc(uint8_t* tag);
 
-// 💡 [수정됨] 2개의 인자를 받던 Cdr 래퍼 대신, 
-// Segfault를 방지하고 LTO Pass와 완벽히 호환되는 3개의 인자(src, dest, len)를 받는 함수 포인터로 변경!
+// This design prevents Segfaults and achieves perfect compatibility with the LTO Pass.
 typedef void (*RealSerializeMemcpyFunc)(void* src, void* dest, size_t len);
 
 bool AESGCMGMAC_Transform::encode_serialized_payload(
@@ -170,50 +166,49 @@ bool AESGCMGMAC_Transform::encode_serialized_payload(
             RealSerializeMemcpyFunc actual_serialize_memcpy = reinterpret_cast<RealSerializeMemcpyFunc>(func_ptr);
             void* original_raw_data = reinterpret_cast<void*>(raw_data_ptr);
 
-            // 1. SROS2 프로토콜: 암호문 길이는 오직 "순수 페이로드 데이터 크기" (예: 48바이트)
+            // 1. SROS2 Protocol constraint: ciphertext length corresponds strictly to the pure payload data size.
             uint32_t total_crypto_len = real_size_meta; 
             
-            // 2. 🚀 네이티브 Big-Endian 직렬화! (지저분한 비트 시프트 배열 삭제)
+            // 2. Native Big-Endian serialization.
             serializer.serialize(total_crypto_len, eprosima::fastcdr::Cdr::Endianness::BIG_ENDIANNESS);
 
             size_t total_aad_len = serializer.getSerializedDataLength();
 
-            // 3. 점프 실행 (반드시 순수 데이터 크기인 total_crypto_len 만큼만 점프하여 공간 확보)
+            // 3. Execute the buffer jump to guarantee allocation context matching total_crypto_len bytes.
             if (!serializer.jump(total_crypto_len)) {
-                printf("[DEBUG TX] ❌ ERROR: jump(%u) failed!\n", total_crypto_len);
+                printf("[DEBUG TX] ERROR: jump(%u) failed!\n", total_crypto_len);
                 return false;
             }
 
-            // 4. 목적지 포인터 설정
+            // 4. Establish target destination pointer bounds.
             uint8_t* dest_ptr = reinterpret_cast<uint8_t*>(output_buffer.getBuffer()) + total_aad_len;
 
-            // 5. 🚀 엔진 가동 (🚨 fuse_update_enc 호출 완전 삭제!)
-            // 순정 OpenSSL과 동일하게 AAD를 전혀 해싱하지 않고 0으로 둡니다.
+            // 5. Initialize the cryptographic execution context.
+            // Following standard OpenSSL specifications, AAD hashing is set to zero.
             fuse_init(session->SessionKey.data(), initialization_vector.data());
             
-            // 6. LTO 훅 호출 (순수 데이터만 복사 및 암호화합니다)
+            // 6. Invoke the LTO hook interface (Only processes pure source data for copying and encryption).
             actual_serialize_memcpy(original_raw_data, dest_ptr, real_size_meta);
             
-            // 7. MAC 생성 및 tag 구조체 할당
-            // AAD 길이가 0인 상태로 완벽하게 OpenSSL 호환 태그가 튀어나옵니다!
+            // 7. Generate authentication token constraints and assign the metadata structure.
             std::array<uint8_t, 16> mac_tag;
             fuse_finalize_enc(mac_tag.data());
             tag.common_mac = mac_tag;
             
-            // 8. 🚨 [매우 중요] 프레임워크가 패킷 길이를 알 수 있도록 업데이트
+            // 8. Update payload lengths explicitly to ensure framework packet length synchronization.
             output_payload.length = static_cast<uint32_t>(serializer.getSerializedDataLength());
         }
         catch (std::exception& e) {
-            printf("[DEBUG TX] ❌ EXCEPTION in Fast-Path: %s\n", e.what());
+            printf("[DEBUG TX] EXCEPTION in Fast-Path: %s\n", e.what());
             return false;
         }
         catch (...) {
-            printf("[DEBUG TX] ❌ UNKNOWN EXCEPTION in Fast-Path\n");
+            printf("[DEBUG TX] UNKNOWN EXCEPTION in Fast-Path\n");
             return false;
         }
     }
     else {
-        // 🐢 [SLOW-PATH] 무거운 센서 데이터 등 일반 패킷은 순정 로직 그대로 처리
+        // [SLOW-PATH] Standard path logic falls back here to handle conventional payloads normally.
         try
         {
             if (!serialize_SecureDataBody(serializer, keyMat.transformation_kind, session->SessionKey,
@@ -230,7 +225,7 @@ bool AESGCMGMAC_Transform::encode_serialized_payload(
     }
     // =========================================================================
 
-    // 3. Tag 직렬화 (순정 그대로 유지)
+    // 3. Tag Serialization (Maintained identical to vanilla framework logic)
 
     try
     {

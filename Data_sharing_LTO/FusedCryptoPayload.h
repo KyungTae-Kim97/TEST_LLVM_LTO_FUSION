@@ -13,7 +13,6 @@ private:
 
     uint8x16_t ctr_block;
     
-    // 🚀 미리 비트 반전(Bit-Reflected)된 해시 키들을 저장
     uint8x16_t hash_key;
     uint8x16_t hash_key2;
     uint8x16_t hash_key3;
@@ -34,9 +33,6 @@ private:
             return vrev32q_u8(vreinterpretq_u8_u32(ctr32)); \
         }())
     
-    // ====================================================================
-    // 🚀 [최적화 1] 초기화 시 거듭제곱을 구하기 위한 내부 GF 곱셈 (양방향 반전)
-    // ====================================================================
     inline __attribute__((always_inline)) uint8x16_t gf_mul_internal(uint8x16_t a, uint8x16_t b) {
         uint8x16_t rA = vrbitq_u8(a);
         uint8x16_t rB = vrbitq_u8(b);
@@ -73,16 +69,13 @@ private:
         return vrbitq_u8(vreinterpretq_u8_u64(res));
     }
 
-    // ====================================================================
-    // 🚀 [최적화 2] 런타임용 GF 곱셈 (h_rev는 캐싱된 반전 형태를 그대로 사용)
-    // ====================================================================
     inline __attribute__((always_inline)) uint8x16_t gf_mul_arm(uint8x16_t a, uint8x16_t h_rev) {
         uint8x16_t rA = vrbitq_u8(a);
         
         poly64_t a_lo = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 0);
         poly64_t a_hi = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 1);
-        poly64_t b_lo = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 0); // 반전 생략
-        poly64_t b_hi = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 1); // 반전 생략
+        poly64_t b_lo = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 0); 
+        poly64_t b_hi = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 1); 
 
         poly128_t p0 = vmull_p64(a_lo, b_lo);
         poly128_t p1 = vmull_p64(a_hi, b_hi);
@@ -111,9 +104,6 @@ private:
         return vrbitq_u8(vreinterpretq_u8_u64(res));
     }
 
-    // ====================================================================
-    // 🚀 [최적화 3] 레지스터 즉시 누적 (구조체 및 스택 메모리 낭비 제거)
-    // ====================================================================
     #define PMULL_ACCUMULATE_STD(A, H_rev, sum_lo, sum_hi, sum_mid) { \
         uint8x16_t rA = vrbitq_u8(A); \
         poly64_t a0 = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 0); \
@@ -270,7 +260,6 @@ public:
             alignas(16) uint8_t zero_bytes[16] = {0};
             uint8x16_t zero_block = vld1q_u8(zero_bytes);
             
-            // 🚀 내부 GF 곱셈으로 거듭제곱 계산
             uint8x16_t hk = aes256_encrypt_arm(zero_block);
             uint8x16_t hk2 = gf_mul_internal(hk, hk);
             uint8x16_t hk3 = gf_mul_internal(hk2, hk);
@@ -280,7 +269,6 @@ public:
             uint8x16_t hk7 = gf_mul_internal(hk6, hk);
             uint8x16_t hk8 = gf_mul_internal(hk7, hk);
 
-            // 🚀 루프 최적화를 위해 생성된 해시 키들을 미리 비트 반전하여 캐싱
             hash_key  = vrbitq_u8(hk);
             hash_key2 = vrbitq_u8(hk2);
             hash_key3 = vrbitq_u8(hk3);
@@ -318,38 +306,19 @@ public:
     }
 
     inline __attribute__((always_inline)) void process_tail_fused(const uint8_t* src, uint8_t* dest, size_t len) {
-        // if (len == 0) return;
-        // alignas(16) uint8_t t_in[16] = {0}, t_out[16] = {0};
-        // memcpy(t_in, src, len);
-        
-        // uint8x16_t ks = aes256_encrypt_arm(ctr_block);
-        // uint8x16_t ct = veorq_u8(vld1q_u8(t_in), ks);
-        // vst1q_u8(t_out, ct);
-        // memcpy(dest, t_out, len);
-        // for(size_t i=len; i<16; ++i) t_out[i] = 0;
-        
-        // uint8x16_t ct_padded = vld1q_u8(t_out);
-        // current_hash = gf_mul_arm(veorq_u8(current_hash, ct_padded), hash_key);
-        // increment_counter_arm();
 
         if (len == 0) return;
 
-        // 1. 메모리 보호를 위한 최소한의 복사 (컴파일러 최적화로 매우 빠름)
         alignas(16) uint8_t t_in[16] = {0};
         memcpy(t_in, src, len);
 
-        // 2. Keystream 생성 및 16바이트 풀-사이즈 암호화 연산
         uint8x16_t ks = aes256_encrypt_arm(ctr_block);
         uint8x16_t ct_full = veorq_u8(vld1q_u8(t_in), ks);
 
-        // 3. 암호화된 결과 중 필요한 길이(len)만큼만 전송 (질문자님의 아이디어 적용!)
         alignas(16) uint8_t t_out[16];
         vst1q_u8(t_out, ct_full);
         memcpy(dest, t_out, len);
 
-        // ====================================================================
-        // 🚀 [핵심 최적화] for 루프를 없애고 NEON 마스크 테이블을 사용
-        // ====================================================================
         static const uint8_t mask_table[32] = {
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 상위 16바이트는 1 (살릴 부분)
@@ -357,14 +326,10 @@ public:
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // 하위 16바이트는 0 (지울 부분)
         };
 
-        // len 값에 따라 테이블을 슬라이딩하여 마스크 로드
-        // 예: len이 5라면 0xFF가 5개, 0x00이 11개인 16바이트 마스크를 단 한 번의 명령어로 로드
         uint8x16_t mask = vld1q_u8(mask_table + 16 - len); 
         
-        // 비트 AND 연산으로 나머지 찌꺼기 바이트를 즉시 0으로 만듦 (for 루프 대체)
         uint8x16_t ct_padded = vandq_u8(ct_full, mask); 
 
-        // 4. 패딩된 블록을 GHASH에 누적
         current_hash = gf_mul_arm(veorq_u8(current_hash, ct_padded), hash_key);
         increment_counter_arm();
     }
@@ -450,7 +415,6 @@ public:
         vst1q_u8(dest + 32, ct2);
         vst1q_u8(dest + 48, ct3);
 
-        // 💡 4블록 레지스터 즉시 누적 (구조체 오버헤드 완벽 제거)
         uint64x2_t sum_lo = vdupq_n_u64(0);
         uint64x2_t sum_hi = vdupq_n_u64(0);
         uint64x2_t sum_mid = vdupq_n_u64(0);
@@ -536,7 +500,6 @@ public:
         vst1q_u8(dest + 96, ct6);
         vst1q_u8(dest + 112, ct7);
 
-        // 💡 8블록 지연 축소 즉시 누적
         uint64x2_t sum_lo = vdupq_n_u64(0);
         uint64x2_t sum_hi = vdupq_n_u64(0);
         uint64x2_t sum_mid = vdupq_n_u64(0);
@@ -576,7 +539,6 @@ public:
         uint8x16_t ct2 = vld1q_u8(src + 32);
         uint8x16_t ct3 = vld1q_u8(src + 48);
 
-        // 💡 복호화 시에도 동일한 레지스터 최적화 지연 축소 적용
         uint64x2_t sum_lo = vdupq_n_u64(0);
         uint64x2_t sum_hi = vdupq_n_u64(0);
         uint64x2_t sum_mid = vdupq_n_u64(0);
@@ -642,7 +604,6 @@ public:
     }
 
     inline __attribute__((always_inline)) void decrypt_128bytes_fused_arm(const uint8_t* src, uint8_t* dest) {
-        // 1. 8블록 암호문 로드 (vld1q_u8_x4를 활용한 효율적인 연속 메모리 로드)
         uint8x16x4_t ct_blk0 = vld1q_u8_x4(src);
         uint8x16x4_t ct_blk1 = vld1q_u8_x4(src + 64);
 
@@ -651,7 +612,6 @@ public:
         uint8x16_t ct4 = ct_blk1.val[0]; uint8x16_t ct5 = ct_blk1.val[1];
         uint8x16_t ct6 = ct_blk1.val[2]; uint8x16_t ct7 = ct_blk1.val[3];
 
-        // 2. 8블록 지연 축소 즉시 누적 (암호문을 바로 GHASH에 반영)
         uint64x2_t sum_lo = vdupq_n_u64(0);
         uint64x2_t sum_hi = vdupq_n_u64(0);
         uint64x2_t sum_mid = vdupq_n_u64(0);
@@ -682,7 +642,6 @@ public:
         uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
         current_hash = vrbitq_u8(vreinterpretq_u8_u64(res));
 
-        // 3. 8블록 카운터 및 Keystream 병렬 생성
         uint8x16_t ctr0 = ctr_block;
         uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
         uint8x16_t ctr2 = INC_ARM_CTR32(ctr0, 2);
@@ -716,7 +675,6 @@ public:
         v4 = vaesmcq_u8(v4); v5 = vaesmcq_u8(v5); v6 = vaesmcq_u8(v6); v7 = vaesmcq_u8(v7);
         k = round_keys[14];
 
-        // 4. 복호화 (Ciphertext ^ Keystream) 및 저장
         uint8x16_t pt0 = veorq_u8(ct0, veorq_u8(v0, k));
         uint8x16_t pt1 = veorq_u8(ct1, veorq_u8(v1, k));
         uint8x16_t pt2 = veorq_u8(ct2, veorq_u8(v2, k));
@@ -740,7 +698,6 @@ public:
 
     inline __attribute__((always_inline)) void finalize(size_t aad_len, size_t payload_len, uint8_t* out_tag) {
         alignas(16) uint8_t len_blk[16] = {0};
-        // GCM 표준 길이 규격 생성
         uint64_t al = __builtin_bswap64((uint64_t)aad_len * 8);
         uint64_t pl = __builtin_bswap64((uint64_t)payload_len * 8);
         memcpy(len_blk, &al, 8);

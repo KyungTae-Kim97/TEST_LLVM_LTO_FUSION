@@ -2,20 +2,16 @@
 #include <string.h>
 #include <stdio.h> 
 
-// =========================================================================
-// 🚨 [핵심 수정] thread_local을 전부 제거하고, 가시성(visibility)을 default로 강제 설정하여 
-// 플러그인(dlopen) 경계에서도 OS가 동일한 메모리로 강제 병합(Merge)하게 만듭니다.
-// ========================================================================= why thread_local not be used in .so ??
 
 extern "C" {
     __attribute__((visibility("default"))) FusedCryptoPayload g_crypto_engine;
     __attribute__((visibility("default"))) size_t tl_aad_len = 0;
     __attribute__((visibility("default"))) size_t tl_payload_len = 0;
 
-    // 💡 [핵심 스위치] 두 세계를 하나로 연결할 유일한 전역 스위치
+    // [Core Switch] The unique global switch linking both spaces together
     __attribute__((visibility("default"))) bool g_fuse_active = false;
 
-    // 🚨 [수정됨] alignas(16)을 제거하고, attribute 내부에 aligned(16)을 추가하여 병합
+    // [Modification] Replaced alignas(16) with __attribute__((aligned(16))) inside the declaration for symbol merging
     __attribute__((visibility("default"), aligned(16))) uint8_t tx_keystream_buf[128] = {0}; 
     __attribute__((visibility("default"), aligned(16))) uint8_t tx_gmac_buf[128] = {0};      
     
@@ -31,43 +27,44 @@ extern "C" {
 
 
 // =========================================================================
-// 내부 헬퍼 함수
+// Internal Helper Functions
 // =========================================================================
 inline __attribute__((always_inline)) void tx_generate_keystream() {
-    // ARM 최적화 헤더에 맞춰 128바이트 키스트림 생성 전용 함수를 단독 호출합니다.
+    // Invoke the dedicated 128-byte keystream generation function optimized for ARM architectures.
     g_crypto_engine.generate_keystream_128bytes_arm(tx_keystream_buf); 
-    tx_ks_pos = 0; // 버퍼를 다 채웠으므로 인덱스 초기화
+    tx_ks_pos = 0; // Reset the index buffer once populated
 }
 
 extern "C" {
     // =====================================================================
-    // 공통 초기화
+    // Common Initialization
     // =====================================================================
     void fuse_init(const uint8_t* key, const uint8_t* iv) {
         g_crypto_engine.init(key, iv);
         tl_aad_len = 0;
         tl_payload_len = 0;
         
-        // TX 스트리밍 상태 초기화
+        // Reset the transmitter streaming state
         tx_ks_pos = 128; 
         tx_gmac_pos = 0;
 
-        // 💡 SROS2 보안 헤더 직렬화가 끝난 후 이 함수가 호출되므로,
-        // 이제부터 LTO 인라인 암호화를 활성화합니다!
+        // Since this routine runs right after SROS2 finishes serializing the security header, 
+        // LTO inline encryption is now activated.
         g_fuse_active = true;
     }
 
     // =====================================================================
-    // 플러그인 레벨의 벌크(Bulk) 암호화 (TX Fallback / AAD용)
+    // Plugin-Level Bulk Encryption (Fallback for TX / Intended for AAD)
     // =====================================================================
     void fuse_update_enc(const uint8_t* src, uint8_t* dest, size_t len) {
-        // dest가 nullptr이 아니라는 것은 Security 플러그인이 페이로드를 넘겼다는 뜻!
-        // 하지만 우리는 LTO로 이미 직렬화 단계에서 암호화를 끝냈으므로 방어 코드로 조기 종료합니다.
+        // If dest is not a nullptr, it indicates that the Security plugin has passed down a payload.
+        // However, since we have already finalized encryption at the serialization phase via LTO, 
+        // we return early to prevent double encryption.
         if (dest != nullptr) {
-            return; // 이중 암호화 방지
+            return; 
         }
 
-        // dest == nullptr 일 때 (즉, AAD가 들어왔을 때만) GHASH 처리
+        // Process GHASH calculation only if dest == nullptr (implying AAD ingestion)
         size_t offset = 0;
         tl_aad_len += len;
         while (offset + 16 <= len) {
@@ -81,20 +78,20 @@ extern "C" {
     }
 
     // =====================================================================
-    // LLVM LTO 주입 전용 - 인라인(Inline) 스트리밍 암호화 인터페이스
+    // LLVM LTO Injection Interface - Inline Streaming Encryption
     // =====================================================================
     
-    // 8비트 (1바이트) 인라인 암호화
+    // 8-bit (1 byte) Inline Encryption
     uint8_t fuse_inline_enc_8(uint8_t pt) {
         if (!g_fuse_active) return pt;
 
-        // 분기 예측(Branch Prediction) 관점에서 CPU가 if문을 무시할 확률 극대화
+        // Maximize branch prediction performance by optimizing for sequential execution paths
         if (tx_ks_pos == 128) tx_generate_keystream();
 
         uint8_t ct = pt ^ tx_keystream_buf[tx_ks_pos++];
         tx_gmac_buf[tx_gmac_pos++] = ct;
         
-        // GMAC은 16바이트(1블록)가 찰 때마다 해시 누적
+        // Accumulate GMAC hash blocks whenever 16 bytes (1 block) are filled
         if (tx_gmac_pos == 128) {
              for(int i=0; i<8; i++){
                  g_crypto_engine.accumulate_gmac(tx_gmac_buf + i*16);
@@ -106,7 +103,7 @@ extern "C" {
         return ct;
     }
 
-    // 16비트 (2바이트) 인라인 암호화
+    // 16-bit (2 bytes) Inline Encryption
     uint16_t fuse_inline_enc_16(uint16_t pt) {
         if (!g_fuse_active) return pt;
 
@@ -119,7 +116,7 @@ extern "C" {
         return ct;
     }
 
-    // 32비트 (4바이트) 인라인 암호화
+    // 32-bit (4 bytes) Inline Encryption
     uint32_t fuse_inline_enc_32(uint32_t pt) {
         if (!g_fuse_active) return pt;
 
@@ -134,7 +131,7 @@ extern "C" {
         return ct;
     }
 
-    // 64비트 (8바이트) 인라인 암호화
+    // 64-bit (8 bytes) Inline Encryption
     uint64_t fuse_inline_enc_64(uint64_t pt) {
         if (!g_fuse_active) return pt;
 
@@ -148,9 +145,9 @@ extern "C" {
     }
 
     // =====================================================================
-    // 문자열, 배열 등의 MemCpy 대체를 위한 인라인 암호화 함수
+    // Inline Encryption Routines designed to override standard MemCpy structures
     // =====================================================================
-    // 🚨 [핵심 수정 1] C 이름 맹글링 방지 및 최적화 강제 금지 속성 부여
+    // Explicitly enforce C linkage name mangling prevention and disable compiler function optimizations
     extern "C" __attribute__((noinline, used))
     void fuse_inline_enc_memcpy(uint8_t* dest, const uint8_t* src, size_t len) {
         
@@ -165,8 +162,8 @@ extern "C" {
         size_t offset = 0;
 
         // =====================================================================
-        // 🚀 [NEON 폭발] 가짜 헤더 주입 완전 삭제! 순수 원본 100% 다이렉트 가속!
-        // 목적지(dest) 오프셋 밀림 현상도 없으므로, src와 dest가 동일 선상에서 1:1 매칭됩니다.
+        // [NEON Acceleration] Removed fake header generation; direct payload acceleration.
+        // Source and destination mappings align cleanly 1:1 with no offset tracking.
         // =====================================================================
         if (tx_gmac_pos == 0 && tx_ks_pos == 128) {
             
@@ -190,7 +187,7 @@ extern "C" {
         }
         
         // =====================================================================
-        // 🐢 [Tail 블록] 남은 찌꺼기 처리
+        // [Tail Block] Process residual trailing data blocks
         // =====================================================================
         size_t tail_len = len - offset;
         if (tail_len > 0) {
@@ -202,10 +199,10 @@ extern "C" {
     }
     
     // =====================================================================
-    // 태그 최종 생성 (TX 전용)
+    // Final Tag Serialization (Transmitter Context Only)
     // =====================================================================
     void fuse_finalize_enc(uint8_t* out_tag) {
-        // 128바이트 버퍼에 남아있는 모든 데이터를 16바이트 단위로 쪼개서 해시 처리
+        // Slice and process residual contents remaining inside the 128-byte tracking buffer into 16-byte chunks
         size_t processed = 0;
         while (processed < tx_gmac_pos) {
             size_t chunk = (tx_gmac_pos - processed >= 16) ? 16 : (tx_gmac_pos - processed);

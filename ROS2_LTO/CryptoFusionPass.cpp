@@ -18,7 +18,7 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
     PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
         StringRef FuncName = F.getName();
         
-        // 💡 타겟 함수 분류 (TX는 FastCdr 직렬화, RX 복호화는 OpenSSL 기본 사용으로 패스 생략)
+        // Target function classification (TX maps to FastCdr serialization; RX decryption bypasses this pass by using default OpenSSL)
         bool isFastCdr = (FuncName.contains("Cdr") && 
                           FuncName.contains("serialize") && 
                           !FuncName.contains("deserialize"));
@@ -35,7 +35,7 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
         IntegerType *Int8Ty = Type::getInt8Ty(Ctx);
 
         // =====================================================================
-        // [Part 1] TX 송신부: Fast-CDR 직렬화 인라인 후킹 (Zero-Cache-Miss)
+        // [Part 1] TX Transmitter: Fast-CDR Serialization Inline Hooking (Zero-Cache-Miss)
         // =====================================================================
         bool Changed = false;
         FunctionCallee FuseEnc8  = M->getOrInsertFunction("fuse_inline_enc_8", Int8Ty, Int8Ty);
@@ -48,10 +48,10 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
         std::vector<Instruction*> InstToRemove;
 
         for (BasicBlock &BB : F) {
-            // 🚨 [핵심 수정] 범위 기반 for문(for I : BB)을 명시적 반복자로 변경
+            // [Core Fix] Changed the range-based for loop (for I : BB) to an explicit iterator
             for (auto IT = BB.begin(), E = BB.end(); IT != E; ) {
                 
-                // 💡 명령어를 참조(I)함과 동시에, 반복자(IT)는 다음으로 미리 전진시킵니다.
+                // Reference the instruction (I) while advancing the iterator (IT) safely ahead of time.
                 Instruction &I = *IT++; 
 
                 if (StoreInst *Store = dyn_cast<StoreInst>(&I)) {
@@ -73,8 +73,8 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
                         if (EncVal) {
                             Store->setOperand(0, EncVal);
                             Changed = true;
-                            // 💡 [디버깅 추가] StoreInst가 걸렸을 때 출력!
-                            errs() << "  👉 [DEBUG] Hooked a 'StoreInst' (" 
+                            // [Debugging Added] Print log when a StoreInst is successfully intercepted
+                            errs() << "  [DEBUG] Hooked a 'StoreInst' (" 
                                    << ValTy->getIntegerBitWidth() << "-bit) in function: " << FuncName << "\n";
                         }
                     }
@@ -87,16 +87,16 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
                     IRBuilder<> Builder(MemCpy);
                     Value *Len64 = Builder.CreateZExtOrTrunc(Len, Int64Ty);
                     
-                    // 1. 암호화 융합 함수 호출 생성
+                    // 1. Generate the encryption fusion function call
                     Builder.CreateCall(FuseMemcpy, {Dest, Src, Len64});
                     
-                    // 2. 즉시 삭제! 
-                    // (IT는 이미 다음 명령어를 가리키고 있으므로 루프가 터지지 않습니다)
+                    // 2. Erase immediately! 
+                    // (Safe to delete since IT has already advanced to the next instruction)
                     MemCpy->eraseFromParent();
                     Changed = true;
-                    errs() << "  👉 [DEBUG] Hooked a 'MemCpyInst' (Intrinsic) in function (debug version): " << FuncName << "\n";
+                    errs() << "  [DEBUG] Hooked a 'MemCpyInst' (Intrinsic) in function (debug version): " << FuncName << "\n";
                 }
-                // 3️⃣ 🚨 [강력 추천] 이전 분석에서 말씀드린 일반 CallInst(memcpy) 확인 추가
+                // [Highly Recommended] Added explicit check for standard CallInst (memcpy) from previous analysis
                 else if (CallInst *Call = dyn_cast<CallInst>(&I)) {
                     Function *CalledFunc = Call->getCalledFunction();
                     if (CalledFunc && (CalledFunc->getName() == "memcpy" || 
@@ -113,17 +113,17 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
                         Call->eraseFromParent();
                         Changed = true;
 
-                        // 💡 [디버깅 추가] 일반 memcpy 함수 호출이 걸렸을 때 출력!
-                        errs() << "  👉 [DEBUG] Hooked a 'CallInst' (Standard memcpy) in function: " << FuncName << "\n";
+                        // [Debugging Added] Print log when a standard memcpy CallInst is intercepted
+                        errs() << "  [DEBUG] Hooked a 'CallInst' (Standard memcpy) in function: " << FuncName << "\n";
                     }
                 }
             }
         }
         
-        // 💡 더 이상 InstToRemove 배열을 사용할 필요가 없으므로 해당 삭제 루프는 지웁니다.
-        // for (Instruction *Inst : InstToRemove) Inst->eraseFromParent(); // <- 삭제
+        // InstToRemove array is no longer needed; the deferred deletion loop is removed.
+        // for (Instruction *Inst : InstToRemove) Inst->eraseFromParent(); // <- Removed
         
-        if (Changed) errs() << "[CryptoFusionPass] 💉 Injected Inline Encryption into Fast-CDR: " << FuncName << "\n";
+        if (Changed) errs() << "[CryptoFusionPass] Injected Inline Encryption into Fast-CDR: " << FuncName << "\n";
         
         return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
     }

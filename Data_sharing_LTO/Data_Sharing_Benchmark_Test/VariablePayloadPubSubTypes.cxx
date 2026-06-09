@@ -65,7 +65,6 @@ bool VariablePayloadPubSubType::serialize(
 
     try
     {
-        // 💡 여기서 실제 데이터 구조체의 serialize 함수를 호출합니다!
         p_type->serialize(ser);
     }
     catch (eprosima::fastcdr::exception::NotEnoughMemoryException&)
@@ -95,8 +94,6 @@ bool VariablePayloadPubSubType::deserialize(
         deser.read_encapsulation();
         payload->encapsulation = deser.endianness() == eprosima::fastcdr::Cdr::BIG_ENDIANNESS ? CDR_BE : CDR_LE;
 
-        // 💡 [핵심] 여기서 알맹이 함수(VariablePayload.cxx)를 호출해야 비로소 
-        // 우리가 심어둔 스나이퍼 타겟(FastCdr_deserialize_memcpy)이 발동합니다!
         p_type->deserialize(deser);
     }
     catch (eprosima::fastcdr::exception::NotEnoughMemoryException& /*exception*/)
