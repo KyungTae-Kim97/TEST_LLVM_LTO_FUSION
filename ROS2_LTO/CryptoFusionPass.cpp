@@ -120,8 +120,6 @@ struct CryptoFusionPass : public PassInfoMixin<CryptoFusionPass> {
             }
         }
         
-        // InstToRemove array is no longer needed; the deferred deletion loop is removed.
-        // for (Instruction *Inst : InstToRemove) Inst->eraseFromParent(); // <- Removed
         
         if (Changed) errs() << "[CryptoFusionPass] Injected Inline Encryption into Fast-CDR: " << FuncName << "\n";
         
