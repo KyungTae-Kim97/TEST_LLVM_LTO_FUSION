@@ -30,7 +30,7 @@ A high-performance, hardware-aware secure architecture for ROS2 and FastDDS. Thi
 * **`main.cpp`**
   The core benchmarking application that orchestrates the Publisher and Subscriber nodes. It configures the QoS policies (enabling Data-Sharing) and executes the throughput and latency measurements.
 * **`VariablePayload.idl` & Generated Files (`.h`, `.cxx`)**
-  The Interface Definition Language (IDL) specification and its generated C++ sources. Modified with specific byte offsets (`jump(+24)`) to bypass middleware headers and accommodate the fused IV/MAC tail.
+  The Interface Definition Language (IDL) specification and its generated C++ sources. 
 * **`VariablePayloadPubSubTypes.cxx`**
   The FastDDS TypeSupport implementation, specifically extended to allocate a 5MB shared memory chunk to accommodate massive payload zero-copy transfers.
 * **`fastddsgen.jar`**
