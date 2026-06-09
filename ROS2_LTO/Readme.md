@@ -32,7 +32,7 @@ By replacing the standard encoding/decoding functions with inline, hardware-acce
 * **`VariablePayloadPubSubTypes.cxx`**
   The FastDDS TypeSupport implementation featuring an innovative **Thunk (Trampoline) pattern**. By explicitly passing a `memcpy` function pointer and a `thunk flag`, it creates a clear optimization boundary. The LLVM pass devirtualizes this indirect call during Link-Time Optimization (LTO), achieving true "One-Shot" execution—fusing Fast-CDR serialization and AES-GCM encryption into a single, intermediate-buffer-free CPU cycle compliant with RTPS standards.
 * **`VariablePayload.idl` & Generated Files (`.h`, `.cxx`)**
-  The Interface Definition Language (IDL) specification and its generated C++ sources. Modified with specific byte offsets (`jump(+24)`) to bypass middleware headers and accommodate the fused IV/MAC tail.
+  The Interface Definition Language (IDL) specification and its generated C++ sources. 
 * **`fastddsgen.jar`**
   The eProsima Fast DDS code generator used to compile the IDL specifications into the necessary C++ structures.
   
