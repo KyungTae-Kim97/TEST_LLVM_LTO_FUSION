@@ -44,4 +44,5 @@ By replacing the standard encoding/decoding functions with inline, hardware-acce
 
 * **Massive Throughput Gains (Up to 1.73x):** Consistently outperforms the standard SROS2 across all payload scales. At the critical 1024-byte payload mark, LTO Fusion achieves **102,057 msg/s** compared to Pure SROS2's 58,750 msg/s, delivering a ~1.73x performance multiplier.
 * **Drastic Latency Reduction & Tail Control:** Slashes Average, P50, and P99 tail latencies. In massive payload scenarios (e.g., 32,768 bytes), LTO Fusion suppresses the average latency to **35.75 µs**—less than half of the standard SROS2 bottleneck (87.38 µs), guaranteeing deterministic real-time execution for robotic systems.
+
 * **Synergistic Step-wise Optimization:** The benchmarks mathematically prove the architectural superiority. While standalone hardware acceleration (8-way NEON) provides significant gains, coupling it with LTO memory optimization (Zero Call-Stack) shatters the framework overhead, pushing the cryptographic pipeline to its absolute hardware limits.
