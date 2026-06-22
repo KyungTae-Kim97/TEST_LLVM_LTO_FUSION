@@ -4,7 +4,7 @@
 #include <vector>
 #include <iomanip>
 #include <cuda_runtime.h>
-#include <openssl/evp.h> // 🌟 실제 SROS2가 사용하는 OpenSSL 엔진
+#include <openssl/evp.h> // The OpenSSL engine that real SROS2 uses
 #include "ThunkHeader.hpp"
 
 extern "C" void init_gpu_crypto_engine();
@@ -13,25 +13,25 @@ extern "C" void run_gpu_gcm(uint8_t* d_data, size_t total_bytes, uint8_t* out_ma
 using namespace std::chrono;
 
 // =========================================================================
-// [비교군 1] 완벽한 표준 SROS2 파이프라인 모사 (OpenSSL AES-GCM)
+// [Baseline 1] Faithful emulation of the standard SROS2 pipeline (OpenSSL AES-GCM)
 // =========================================================================
 void sros2_openssl_aes_gcm(const uint8_t* plaintext, int plaintext_len, uint8_t* ciphertext, uint8_t* tag) {
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
     int len;
     
-    // SROS2 더미 키 및 IV 설정
+    // Set up SROS2 dummy key and IV
     uint8_t key[32] = {0x01}; 
     uint8_t iv[12] = {0x0A};
 
-    // AES-256-GCM 초기화 (CPU AES-NI 하드웨어 가속 자동 사용)
+    // Initialize AES-256-GCM (automatically uses CPU AES-NI hardware acceleration)
     EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
     EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv);
 
-    // 실제 암호화 수행 (직렬화된 버퍼를 읽어서 암호문 버퍼에 쓰기)
+    // Perform the actual encryption (read the serialized buffer and write to the ciphertext buffer)
     EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext, plaintext_len);
     EVP_EncryptFinal_ex(ctx, ciphertext + len, &len);
 
-    // MAC 태그 16바이트 추출
+    // Extract the 16-byte MAC tag
     EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
     EVP_CIPHER_CTX_free(ctx);
 }
@@ -46,12 +46,12 @@ int main() {
 
     std::vector<uint8_t> host_raw_data(DATA_SIZE, 0xFF);
     
-    // CPU SROS2 버퍼
+    // CPU SROS2 buffers
     uint8_t* cdr_serialize_buffer = new uint8_t[DATA_SIZE];
     uint8_t* openssl_crypto_buffer = new uint8_t[DATA_SIZE];
     uint8_t sros2_mac_tag[16];
 
-    // GPU Thunk 파이프라인 버퍼
+    // GPU Thunk pipeline buffers
     uint8_t* unified_data;
     uint8_t* d_mac;
     cudaMallocManaged(&unified_data, DATA_SIZE);
@@ -69,21 +69,21 @@ int main() {
 
     for (int i = 0; i < ITERATIONS; ++i) {
         // ---------------------------------------------------------
-        // 1. [비교군] 표준 SROS2 (Fast-CDR 직렬화 + OpenSSL AES-GCM)
+        // 1. [Baseline] Standard SROS2 (Fast-CDR serialization + OpenSSL AES-GCM)
         // ---------------------------------------------------------
         auto start_std = high_resolution_clock::now();
         
-        // SROS2 단계 1: 페이로드를 DDS 패킷으로 직렬화 (CPU MemCpy)
+        // SROS2 step 1: Serialize the payload into a DDS packet (CPU MemCpy)
         std::memcpy(cdr_serialize_buffer, host_raw_data.data(), DATA_SIZE);
         
-        // SROS2 단계 2: 진짜 OpenSSL AES-GCM 암호화 연산
+        // SROS2 step 2: Real OpenSSL AES-GCM encryption operation
         sros2_openssl_aes_gcm(cdr_serialize_buffer, DATA_SIZE, openssl_crypto_buffer, sros2_mac_tag);
         
         auto end_std = high_resolution_clock::now();
         total_std_time += duration_cast<microseconds>(end_std - start_std).count() / 1000.0;
 
         // ---------------------------------------------------------
-        // 2. [실험군] 제로 카피 Thunk 아키텍처
+        // 2. [Experimental] Zero-Copy Thunk architecture
         // ---------------------------------------------------------
         auto start_thunk = high_resolution_clock::now();
         

@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <cstdint>  // <--- Add this line
 
-// 에러 체크 매크로 (커널이 죽거나 메모리 복사 실패 시 즉각 원인 출력)
+// Error-checking macro (immediately prints the cause when a kernel dies or a memory copy fails)
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t err = call; \
@@ -16,7 +16,7 @@
     } while(0)
 
 // =========================================================================
-// [1] GPU 상수 메모리 (__constant__)
+// [1] GPU constant memory (__constant__)
 // =========================================================================
 __constant__ uint8_t d_sbox[256];
 __constant__ uint8_t d_round_keys[240];
@@ -44,7 +44,7 @@ static const uint8_t h_sbox[256] = {
 };
 
 // =========================================================================
-// [2] 공통 유틸리티 (Device & Host 동일 로직)
+// [2] Common utilities (identical logic on Device & Host)
 // =========================================================================
 __host__ __device__ inline void bytes_to_uint64(const uint8_t* in, uint64_t& hi, uint64_t& lo) {
     hi = ((uint64_t)in[0] << 56) | ((uint64_t)in[1] << 48) | ((uint64_t)in[2] << 40) | ((uint64_t)in[3] << 32) |
@@ -60,7 +60,7 @@ __host__ __device__ inline void uint64_to_bytes(uint64_t hi, uint64_t lo, uint8_
     out[12] = lo >> 24; out[13] = lo >> 16; out[14] = lo >> 8; out[15] = lo;
 }
 
-// 🌟 핵심: 무리한 언롤링 제거 (레지스터 스필링 방지)
+// Key point: remove excessive unrolling (prevents register spilling)
 __host__ __device__ inline void gf_mul_64(uint64_t a_hi, uint64_t a_lo, uint64_t b_hi, uint64_t b_lo, uint64_t& res_hi, uint64_t& res_lo) {
     res_hi = 0; res_lo = 0;
     uint64_t v_hi = b_hi, v_lo = b_lo;
@@ -79,7 +79,7 @@ __host__ __device__ inline void gf_mul_64(uint64_t a_hi, uint64_t a_lo, uint64_t
 }
 
 // =========================================================================
-// [3] 기밀성 엔진: AES-CTR 블록 암호화 (Device)
+// [3] Confidentiality engine: AES-CTR block encryption (Device)
 // =========================================================================
 __device__ inline uint8_t galois_mul2(uint8_t x) { return (x << 1) ^ ((x & 0x80) ? 0x1B : 0x00); }
 
@@ -110,7 +110,7 @@ __device__ void aes256_encrypt_block_cuda(uint8_t* state) {
 }
 
 // =========================================================================
-// [4] 커널 1: 암호화 및 블록 레벨 트리 축약 (Level 0 ~ 7)
+// [4] Kernel 1: encryption and block-level tree reduction (Level 0 ~ 7)
 // =========================================================================
 __global__ void aes_gcm_pass1_kernel(uint8_t* data, uint64_t* out_partial_hi, uint64_t* out_partial_lo) {
     int tid = threadIdx.x; 
@@ -119,7 +119,7 @@ __global__ void aes_gcm_pass1_kernel(uint8_t* data, uint64_t* out_partial_hi, ui
     __shared__ uint64_t shm_hi[256];
     __shared__ uint64_t shm_lo[256];
 
-    // --- 1. 암호화 ---
+    // --- 1. Encryption ---
     alignas(16) uint8_t state[16];
     for (int j = 0; j < 12; ++j) state[j] = d_iv[j];
     
@@ -136,16 +136,16 @@ __global__ void aes_gcm_pass1_kernel(uint8_t* data, uint64_t* out_partial_hi, ui
     orig.x ^= state_vec.x; orig.y ^= state_vec.y; orig.z ^= state_vec.z; orig.w ^= state_vec.w;
     *data_ptr = orig; 
 
-    // --- 2. Leaf 초기화 ---
+    // --- 2. Leaf initialization ---
     uint64_t c_hi, c_lo;
     bytes_to_uint64(reinterpret_cast<uint8_t*>(&orig), c_hi, c_lo);
     gf_mul_64(c_hi, c_lo, d_h_pow_hi[0], d_h_pow_lo[0], shm_hi[tid], shm_lo[tid]);
     __syncthreads();
 
-    // --- 3. 트리의 완벽한 매핑 로직 (Bug Fixed!) ---
+    // --- 3. Perfect tree mapping logic (Bug Fixed!) ---
     for (int s = 0; s < 8; s++) {
         int stride = 1 << s;
-        // 🌟 스레드 ID가 0, 1, 2... 순서대로 정확히 짝을 지어 처리하도록 개선
+        // Improved so thread IDs 0, 1, 2... are paired up and processed in exact order
         int index = 2 * stride * tid; 
         
         if (index < 256) {
@@ -164,7 +164,7 @@ __global__ void aes_gcm_pass1_kernel(uint8_t* data, uint64_t* out_partial_hi, ui
 }
 
 // =========================================================================
-// [5] 커널 2: 글로벌 레벨 트리 축약 (Level 8 ~ 18)
+// [5] Kernel 2: global-level tree reduction (Level 8 ~ 18)
 // =========================================================================
 __global__ void aes_gcm_pass2_kernel(uint64_t* in_partial_hi, uint64_t* in_partial_lo, uint8_t* final_mac) {
     int tid = threadIdx.x; 
@@ -176,7 +176,7 @@ __global__ void aes_gcm_pass2_kernel(uint64_t* in_partial_hi, uint64_t* in_parti
     shm_hi[tid + 1024] = in_partial_hi[tid + 1024]; shm_lo[tid + 1024] = in_partial_lo[tid + 1024];
     __syncthreads();
 
-    // 🌟 안전하게 수정된 Reduction 트리
+    // Safely revised reduction tree
     for (int s = 8; s <= 18; s++) {
         int stride = 1 << (s - 8);
         int index = 2 * stride * tid;
@@ -196,7 +196,7 @@ __global__ void aes_gcm_pass2_kernel(uint64_t* in_partial_hi, uint64_t* in_parti
 }
 
 // =========================================================================
-// [6] Host 측 초기화 (Precomputation)
+// [6] Host-side initialization (Precomputation)
 // =========================================================================
 void host_expand_key(const uint8_t* key, uint8_t* expanded_key) {
     static const uint8_t rcon[7] = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40 };
@@ -230,7 +230,7 @@ void precompute_h_powers(uint8_t* h_key) {
 }
 
 // =========================================================================
-// [7] 벤치마크 메인
+// [7] Benchmark main
 // =========================================================================
 int main() {
     constexpr size_t DATA_SIZE = 8 * 1024 * 1024; 
@@ -264,10 +264,10 @@ int main() {
     cudaEventRecord(start);
     
     aes_gcm_pass1_kernel<<<blocks_pass1, 256>>>(d_data, d_partial_hi, d_partial_lo);
-    CUDA_CHECK(cudaGetLastError()); // 커널 1 크래시 확인
+    CUDA_CHECK(cudaGetLastError()); // Check for kernel 1 crash
 
     aes_gcm_pass2_kernel<<<1, 1024>>>(d_partial_hi, d_partial_lo, d_final_mac);
-    CUDA_CHECK(cudaGetLastError()); // 커널 2 크래시 확인
+    CUDA_CHECK(cudaGetLastError()); // Check for kernel 2 crash
     
     cudaEventRecord(stop);
     CUDA_CHECK(cudaEventSynchronize(stop));
@@ -275,7 +275,7 @@ int main() {
     float ms = 0; cudaEventElapsedTime(&ms, start, stop);
     double bandwidth = (DATA_SIZE / 1e9) / (ms / 1000.0);
 
-    uint8_t result_mac[16] = {0}; // 쓰레기값 방지를 위한 명시적 초기화
+    uint8_t result_mac[16] = {0}; // Explicit initialization to avoid garbage values
     CUDA_CHECK(cudaMemcpy(result_mac, d_final_mac, 16, cudaMemcpyDeviceToHost));
 
     std::cout << "[Parallel Tree Reduction AES-GCM Benchmark]" << std::endl;

@@ -113,28 +113,41 @@ extern "C" {
         return ct;
     }
 
+    // 💡 [Hardware Safety Fix] Use a dedicated atomic counter instead of pointer casting.
+    // This prevents strict aliasing violations and guarantees safe memory alignment on ARM.
+    static std::atomic<uint64_t> g_tx_iv_counter{1};
+
     __attribute__((noinline, used))
     void fuse_inline_enc_memcpy(uint8_t* dest, const uint8_t* src, size_t len) {
         asm volatile("" ::: "memory");
         bool auto_ignited = false;
 
-        // [TX Modification] Save the IV to be used by this context into a local variable.
+        // [TX Modification] Save the IV counter acquired by this thread context into a local variable.
         uint64_t my_tx_iv = 0;
 
         if (!g_fuse_active) {
             if (g_zero_copy_ctx.is_ready.load(std::memory_order_acquire)) {
                 
-                uint64_t* iv_counter = reinterpret_cast<uint64_t*>(g_zero_copy_ctx.initialization_vector.data() + 4);
-                my_tx_iv = __atomic_fetch_add(iv_counter, 1, __ATOMIC_SEQ_CST);
+                // 1. Atomically acquire a unique, monotonically increasing counter for this payload.
+                // memory_order_relaxed is sufficient here because it only guarantees uniqueness.
+                my_tx_iv = g_tx_iv_counter.fetch_add(1, std::memory_order_relaxed);
                 
-                // Construct the IV in a temporary array to prevent concurrency race conditions.
-                uint8_t temp_iv[12] = {0};
-                memcpy(temp_iv, g_zero_copy_ctx.initialization_vector.data(), 4); // force_sync_id (4 bytes)
-                memcpy(temp_iv + 4, &my_tx_iv, 8); // Self-acquired counter (8 bytes)
+                // 2. Construct the 12-byte IV in a local array to prevent concurrency race conditions.
+                alignas(16) uint8_t temp_iv[12] = {0};
                 
+                // [Spatial Separation] 4 Bytes: Copy the Public Sender ID derived from the Master Sender Key.
+                // This guarantees zero IV collisions between different Writer instances.
+                memcpy(temp_iv, g_zero_copy_ctx.initialization_vector.data(), 4); 
+                
+                // [Temporal Separation] 8 Bytes: Append the self-acquired atomic counter.
+                // This guarantees zero IV collisions across time for the same Writer instance.
+                memcpy(temp_iv + 4, &my_tx_iv, 8); 
+                
+                // 3. Initialize the hardware SIMD engine with the session key and the newly assembled IV.
                 fuse_init(g_zero_copy_ctx.precomputed_session_key.data(), temp_iv);
                 auto_ignited = true;
             } else {
+                // [Fallback] If the crypto context is not yet armed, perform a standard memory copy.
                 memcpy(dest, src, len);
                 asm volatile("" ::: "memory");
                 return;

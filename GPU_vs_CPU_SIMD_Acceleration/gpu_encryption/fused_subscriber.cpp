@@ -1,10 +1,10 @@
 #include <fastdds/dds/domain/DomainParticipantFactory.hpp>
-#include <fastdds/dds/domain/DomainParticipant.hpp>  // 🌟 추가됨
+#include <fastdds/dds/domain/DomainParticipant.hpp>  // added
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/subscriber/DataReader.hpp>
 #include <fastdds/dds/subscriber/SampleInfo.hpp>
-#include <fastdds/dds/topic/TypeSupport.hpp>         // 🌟 추가됨
-#include <fastdds/dds/topic/Topic.hpp>               // 🌟 추가됨
+#include <fastdds/dds/topic/TypeSupport.hpp>         // added
+#include <fastdds/dds/topic/Topic.hpp>               // added
 #include <iostream>
 #include <iomanip>
 

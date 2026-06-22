@@ -9,13 +9,13 @@ class ThunkPubSubType : public eprosima::fastdds::dds::TopicDataType {
 public:
     ThunkPubSubType() {
         setName("Fused_V2X_Stream"); 
-        m_typeSize = sizeof(ThunkHeader); // 🌟 이제 32바이트로 미들웨어를 속임!
+        m_typeSize = sizeof(ThunkHeader); // Now we fool the middleware with just 32 bytes!
         m_isGetKeyDefined = false;
     }
     virtual ~ThunkPubSubType() override {}
 
     bool serialize(void* data, eprosima::fastrtps::rtps::SerializedPayload_t* payload) override {
-        // data 포인터는 애플리케이션에서 직접 채운 ThunkHeader 객체의 포인터로 가정
+        // Assume the data pointer is a pointer to a ThunkHeader object filled in directly by the application
         std::memcpy(payload->data, data, sizeof(ThunkHeader));
         payload->length = sizeof(ThunkHeader); 
         return true;

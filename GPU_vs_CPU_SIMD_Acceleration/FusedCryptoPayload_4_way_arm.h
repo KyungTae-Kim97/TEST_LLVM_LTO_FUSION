@@ -10,7 +10,6 @@
 
 class FusedCryptoPayload {
 private:
-    // 🚀 AES-256: Key Caching을 위한 상태 변수 (32 바이트)
     uint8_t cached_key[32] = {0};
     bool is_key_cached = false;
 
@@ -30,24 +29,19 @@ private:
         poly64x2_t pA = vreinterpretq_p64_u8(a);
         poly64x2_t pB = vreinterpretq_p64_u8(b);
         
-        // 💡 1. 벡터에서 스칼라(poly64_t) 값으로 안전하게 추출
         poly64_t a0 = vgetq_lane_p64(pA, 0);
         poly64_t a1 = vgetq_lane_p64(pA, 1);
         poly64_t b0 = vgetq_lane_p64(pB, 0);
         poly64_t b1 = vgetq_lane_p64(pB, 1);
         
-        // 정상 동작하던 기존 vmull_p64 호출
         poly128_t m00 = vmull_p64(a0, b0);
         poly128_t m11 = vmull_p64(a1, b1);
         
-        // 💡 2. veor_p64 대신 스칼라 상태에서 uint64_t로 캐스팅하여 안전하게 XOR(^) 연산 수행
         poly64_t a_xor = (poly64_t)((uint64_t)a0 ^ (uint64_t)a1);
         poly64_t b_xor = (poly64_t)((uint64_t)b0 ^ (uint64_t)b1);
         
-        // 이제 타입 불일치 에러 없이 안전하게 호출됨
         poly128_t m01 = vmull_p64(a_xor, b_xor);
         
-        // 💡 3. 하위 로직은 원본 그대로 유지 (GHASH Karatsuba 환원)
         uint64x2_t m00_v = vreinterpretq_u64_p128(m00);
         uint64x2_t m11_v = vreinterpretq_u64_p128(m11);
         uint64x2_t m01_v = vreinterpretq_u64_p128(m01);
@@ -68,7 +62,6 @@ private:
         return vreinterpretq_u8_u64(r_high);
     }
 
-    // 🚀 AES-256: 14라운드 적용
     inline __attribute__((always_inline)) uint8x16_t aes256_encrypt_arm(uint8x16_t in) {
         uint8x16_t v = vaeseq_u8(in, round_keys[0]); v = vaesmcq_u8(v);
         v = vaeseq_u8(v, round_keys[1]); v = vaesmcq_u8(v);
@@ -87,7 +80,6 @@ private:
         return veorq_u8(v, round_keys[14]);
     }
 
-    // 🚀 NIST SP 800-38D 규격: 단일 블록 32-bit (inc32) 증가 로직
     inline __attribute__((always_inline)) void increment_counter_arm() {
         uint32x4_t ctr32 = vreinterpretq_u32_u8(vrev32q_u8(ctr_block));
         ctr32 = vsetq_lane_u32(vgetq_lane_u32(ctr32, 3) + 1, ctr32, 3);
@@ -112,9 +104,6 @@ public:
 #endif
     }
 
-    // =====================================================================
-    // 0. [Init] 초기 설정 (Key Caching 및 AES-256 확장 적용)
-    // =====================================================================
     void init(const uint8_t* key, const uint8_t* iv) {
         bool key_changed = (!is_key_cached) || (memcmp(cached_key, key, 32) != 0);
 
@@ -125,7 +114,6 @@ public:
 
 
 #if defined(__aarch64__)
-            // 🚀 AES-256 Key Expansion (ARM)
             static const uint8_t sbox[256] = {
                 0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
                 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -274,15 +262,11 @@ public:
 #endif
     }
 
-    // =====================================================================
-    // 64바이트 병렬 처리 (AES-256 특화 14라운드 및 32-bit $inc_{32}$ 병렬 생성)
-    // =====================================================================
     inline __attribute__((always_inline)) void process_64bytes_fused(const uint8_t* src, uint8_t* dest) {
 
 #if defined(__aarch64__)
         uint8x16_t ctr0 = ctr_block;
         
-        // 🚀 32-bit Big Endian 순차적 병렬 카운터 계산 매크로
         #define INC_ARM_CTR32(c, val) \
             ([&]() -> uint8x16_t { \
                 uint32x4_t ctr32 = vreinterpretq_u32_u8(vrev32q_u8(c)); \
@@ -306,7 +290,6 @@ public:
             k = round_keys[idx]; \
             v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k);
 
-        // 🚀 AES-256: 13번의 aes/aesmc 수행
         AES_ROUND_4X_ARM(1); AES_ROUND_4X_ARM(2); AES_ROUND_4X_ARM(3);
         AES_ROUND_4X_ARM(4); AES_ROUND_4X_ARM(5); AES_ROUND_4X_ARM(6);
         AES_ROUND_4X_ARM(7); AES_ROUND_4X_ARM(8); AES_ROUND_4X_ARM(9);
@@ -330,14 +313,6 @@ public:
         uint8x16_t ct2 = veorq_u8(pt2, ks2);
         uint8x16_t ct3 = veorq_u8(pt3, ks3);
 
-        // vst1q_u8(dest, ct0);
-        // vst1q_u8(dest + 16, ct1);
-        // vst1q_u8(dest + 32, ct2);
-        // vst1q_u8(dest + 48, ct3);
-
-        // 🚀 [캐시 최적화] Non-Temporal (Streaming) Store
-        // L3 캐시(2MB)를 우회하여 DRAM으로 직행, OS 및 ROS2 필수 데이터의 캐시 방출(Eviction) 방지
-        
         uint64x2_t ct0_64 = vreinterpretq_u64_u8(ct0);
         __builtin_nontemporal_store(vgetq_lane_u64(ct0_64, 0), (uint64_t*)(dest));
         __builtin_nontemporal_store(vgetq_lane_u64(ct0_64, 1), (uint64_t*)(dest + 8));
@@ -394,7 +369,6 @@ public:
         uint8x16_t v2 = vaeseq_u8(ctr2, k);
         uint8x16_t v3 = vaeseq_u8(ctr3, k);
 
-        // 🚀 AES-256: 13번의 aes/aesmc 수행
         AES_ROUND_4X_ARM(1); AES_ROUND_4X_ARM(2); AES_ROUND_4X_ARM(3);
         AES_ROUND_4X_ARM(4); AES_ROUND_4X_ARM(5); AES_ROUND_4X_ARM(6);
         AES_ROUND_4X_ARM(7); AES_ROUND_4X_ARM(8); AES_ROUND_4X_ARM(9);

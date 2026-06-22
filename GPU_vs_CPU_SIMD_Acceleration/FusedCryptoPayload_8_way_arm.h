@@ -1,3 +1,6 @@
+#ifndef FUSED_CRYPTO_PAYLOAD_ARM_H
+#define FUSED_CRYPTO_PAYLOAD_ARM_H
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -5,11 +8,11 @@
 
 class FusedCryptoPayload {
 private:
-    // 🚀 AES-256: Key Caching을 위한 상태 변수 (32 바이트)
     uint8_t cached_key[32] = {0};
     bool is_key_cached = false;
 
     uint8x16_t ctr_block;
+    
     uint8x16_t hash_key;
     uint8x16_t hash_key2;
     uint8x16_t hash_key3;
@@ -23,57 +26,98 @@ private:
     uint8x16_t round_keys[15]; 
     uint8x16_t tag_mask;
 
-    // 🚀 32-bit Big Endian 순차적 병렬 카운터 계산 매크로
     #define INC_ARM_CTR32(c, val) \
         ([&]() -> uint8x16_t { \
             uint32x4_t ctr32 = vreinterpretq_u32_u8(vrev32q_u8(c)); \
             ctr32 = vsetq_lane_u32(vgetq_lane_u32(ctr32, 3) + val, ctr32, 3); \
             return vrev32q_u8(vreinterpretq_u8_u32(ctr32)); \
         }())
+    
+    inline __attribute__((always_inline)) uint8x16_t gf_mul_internal(uint8x16_t a, uint8x16_t b) {
+        uint8x16_t rA = vrbitq_u8(a);
+        uint8x16_t rB = vrbitq_u8(b);
 
-    inline __attribute__((always_inline)) uint8x16_t gf_mul_arm(uint8x16_t a, uint8x16_t b) {
-        poly64x2_t pA = vreinterpretq_p64_u8(a);
-        poly64x2_t pB = vreinterpretq_p64_u8(b);
-        
-        // 💡 1. 벡터에서 스칼라(poly64_t) 값으로 안전하게 추출
-        poly64_t a0 = vgetq_lane_p64(pA, 0);
-        poly64_t a1 = vgetq_lane_p64(pA, 1);
-        poly64_t b0 = vgetq_lane_p64(pB, 0);
-        poly64_t b1 = vgetq_lane_p64(pB, 1);
-        
-        // 정상 동작하던 기존 vmull_p64 호출
-        poly128_t m00 = vmull_p64(a0, b0);
-        poly128_t m11 = vmull_p64(a1, b1);
-        
-        // 💡 2. veor_p64 대신 스칼라 상태에서 uint64_t로 캐스팅하여 안전하게 XOR(^) 연산 수행
-        poly64_t a_xor = (poly64_t)((uint64_t)a0 ^ (uint64_t)a1);
-        poly64_t b_xor = (poly64_t)((uint64_t)b0 ^ (uint64_t)b1);
-        
-        // 이제 타입 불일치 에러 없이 안전하게 호출됨
-        poly128_t m01 = vmull_p64(a_xor, b_xor);
-        
-        // 💡 3. 하위 로직은 원본 그대로 유지 (GHASH Karatsuba 환원)
-        uint64x2_t m00_v = vreinterpretq_u64_p128(m00);
-        uint64x2_t m11_v = vreinterpretq_u64_p128(m11);
-        uint64x2_t m01_v = vreinterpretq_u64_p128(m01);
-        
-        uint64x2_t mid = veorq_u64(veorq_u64(m01_v, m00_v), m11_v);
-        uint64x2_t r_low = veorq_u64(m00_v, vextq_u64(vdupq_n_u64(0), mid, 1));
-        uint64x2_t r_high = veorq_u64(m11_v, vextq_u64(mid, vdupq_n_u64(0), 1));
-        
-        uint64x2_t tmp = veorq_u64(r_low, vshlq_n_u64(r_low, 1));
-        tmp = veorq_u64(tmp, vshlq_n_u64(tmp, 2));
-        tmp = veorq_u64(tmp, vshlq_n_u64(tmp, 7));
-        r_low = veorq_u64(r_low, tmp);
-        
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 63));
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 62));
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 57));
-        
-        return vreinterpretq_u8_u64(r_high);
+        poly64_t a_lo = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 0);
+        poly64_t a_hi = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 1);
+        poly64_t b_lo = vgetq_lane_p64(vreinterpretq_p64_u8(rB), 0);
+        poly64_t b_hi = vgetq_lane_p64(vreinterpretq_p64_u8(rB), 1);
+
+        poly128_t p0 = vmull_p64(a_lo, b_lo);
+        poly128_t p1 = vmull_p64(a_hi, b_hi);
+        poly128_t p2 = vmull_p64((poly64_t)((uint64_t)a_lo ^ (uint64_t)a_hi),
+                                 (poly64_t)((uint64_t)b_lo ^ (uint64_t)b_hi));
+
+        uint64x2_t c0 = vreinterpretq_u64_p128(p0);
+        uint64x2_t c1 = vreinterpretq_u64_p128(p1);
+        uint64x2_t c2 = vreinterpretq_u64_p128(p2);
+
+        c2 = veorq_u64(c2, c0);
+        c2 = veorq_u64(c2, c1);
+
+        uint64_t z0 = vgetq_lane_u64(c0, 0);
+        uint64_t z1 = vgetq_lane_u64(c0, 1) ^ vgetq_lane_u64(c2, 0);
+        uint64_t z2 = vgetq_lane_u64(c1, 0) ^ vgetq_lane_u64(c2, 1);
+        uint64_t z3 = vgetq_lane_u64(c1, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        return vrbitq_u8(vreinterpretq_u8_u64(res));
     }
 
-    // 🚀 AES-256: 14라운드 적용
+    inline __attribute__((always_inline)) uint8x16_t gf_mul_arm(uint8x16_t a, uint8x16_t h_rev) {
+        uint8x16_t rA = vrbitq_u8(a);
+        
+        poly64_t a_lo = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 0);
+        poly64_t a_hi = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 1);
+        poly64_t b_lo = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 0); 
+        poly64_t b_hi = vgetq_lane_p64(vreinterpretq_p64_u8(h_rev), 1); 
+
+        poly128_t p0 = vmull_p64(a_lo, b_lo);
+        poly128_t p1 = vmull_p64(a_hi, b_hi);
+        poly128_t p2 = vmull_p64((poly64_t)((uint64_t)a_lo ^ (uint64_t)a_hi),
+                                 (poly64_t)((uint64_t)b_lo ^ (uint64_t)b_hi));
+
+        uint64x2_t c0 = vreinterpretq_u64_p128(p0);
+        uint64x2_t c1 = vreinterpretq_u64_p128(p1);
+        uint64x2_t c2 = vreinterpretq_u64_p128(p2);
+
+        c2 = veorq_u64(c2, c0);
+        c2 = veorq_u64(c2, c1);
+
+        uint64_t z0 = vgetq_lane_u64(c0, 0);
+        uint64_t z1 = vgetq_lane_u64(c0, 1) ^ vgetq_lane_u64(c2, 0);
+        uint64_t z2 = vgetq_lane_u64(c1, 0) ^ vgetq_lane_u64(c2, 1);
+        uint64_t z3 = vgetq_lane_u64(c1, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        return vrbitq_u8(vreinterpretq_u8_u64(res));
+    }
+
+    #define PMULL_ACCUMULATE_STD(A, H_rev, sum_lo, sum_hi, sum_mid) { \
+        uint8x16_t rA = vrbitq_u8(A); \
+        poly64_t a0 = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 0); \
+        poly64_t a1 = vgetq_lane_p64(vreinterpretq_p64_u8(rA), 1); \
+        poly64_t b0 = vgetq_lane_p64(vreinterpretq_p64_u8(H_rev), 0); \
+        poly64_t b1 = vgetq_lane_p64(vreinterpretq_p64_u8(H_rev), 1); \
+        \
+        sum_lo = veorq_u64(sum_lo, vreinterpretq_u64_p128(vmull_p64(a0, b0))); \
+        sum_hi = veorq_u64(sum_hi, vreinterpretq_u64_p128(vmull_p64(a1, b1))); \
+        sum_mid = veorq_u64(sum_mid, vreinterpretq_u64_p128(vmull_p64( \
+            (poly64_t)((uint64_t)a0 ^ (uint64_t)a1), \
+            (poly64_t)((uint64_t)b0 ^ (uint64_t)b1)))); \
+    }
+
     inline __attribute__((always_inline)) uint8x16_t aes256_encrypt_arm(uint8x16_t in) {
         uint8x16_t v = vaeseq_u8(in, round_keys[0]); v = vaesmcq_u8(v);
         v = vaeseq_u8(v, round_keys[1]); v = vaesmcq_u8(v);
@@ -92,25 +136,10 @@ private:
         return veorq_u8(v, round_keys[14]);
     }
 
-    // 🚀 NIST SP 800-38D 규격: 단일 블록 32-bit (inc32) 증가 로직
     inline __attribute__((always_inline)) void increment_counter_arm() {
         uint32x4_t ctr32 = vreinterpretq_u32_u8(vrev32q_u8(ctr_block));
         ctr32 = vsetq_lane_u32(vgetq_lane_u32(ctr32, 3) + 1, ctr32, 3);
         ctr_block = vrev32q_u8(vreinterpretq_u8_u32(ctr32));
-    }
-
-    // 🚀 다항식 곱셈 결과를 환원 없이 누적만 하는 매크로
-    #define PMULL_ACCUMULATE(A, B, sum00, sum11, sum01) { \
-        poly64_t a0 = vgetq_lane_p64(vreinterpretq_p64_u8(A), 0); \
-        poly64_t a1 = vgetq_lane_p64(vreinterpretq_p64_u8(A), 1); \
-        poly64_t b0 = vgetq_lane_p64(vreinterpretq_p64_u8(B), 0); \
-        poly64_t b1 = vgetq_lane_p64(vreinterpretq_p64_u8(B), 1); \
-        \
-        sum00 = veorq_u64(sum00, vreinterpretq_u64_p128(vmull_p64(a0, b0))); \
-        sum11 = veorq_u64(sum11, vreinterpretq_u64_p128(vmull_p64(a1, b1))); \
-        sum01 = veorq_u64(sum01, vreinterpretq_u64_p128(vmull_p64( \
-            (poly64_t)((uint64_t)a0 ^ (uint64_t)a1), \
-            (poly64_t)((uint64_t)b0 ^ (uint64_t)b1)))); \
     }
 
 public:
@@ -120,17 +149,8 @@ public:
         increment_counter_arm(); 
     }
 
-    inline __attribute__((always_inline)) void accumulate_gmac(const uint8_t* ct_block) {
-        uint8x16_t ct = vld1q_u8(ct_block);
-        current_hash = gf_mul_arm(veorq_u8(current_hash, ct), hash_key);
-    }
-
-    // =====================================================================
-    // 🚀 128바이트 (8-Way) 키 스트림 병렬 생성 (ARM 전용)
-    // =====================================================================
     inline __attribute__((always_inline)) void generate_keystream_128bytes_arm(uint8_t* out_ks) {
         uint8x16_t ctr0 = ctr_block;
-        
         uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
         uint8x16_t ctr2 = INC_ARM_CTR32(ctr0, 2);
         uint8x16_t ctr3 = INC_ARM_CTR32(ctr0, 3);
@@ -138,7 +158,7 @@ public:
         uint8x16_t ctr5 = INC_ARM_CTR32(ctr0, 5);
         uint8x16_t ctr6 = INC_ARM_CTR32(ctr0, 6);
         uint8x16_t ctr7 = INC_ARM_CTR32(ctr0, 7);
-        ctr_block = INC_ARM_CTR32(ctr0, 8); // 다음 호출을 위해 기준 카운터를 단번에 8 증가
+        ctr_block = INC_ARM_CTR32(ctr0, 8); 
 
         uint8x16_t k = round_keys[0];
         uint8x16_t v0 = vaeseq_u8(ctr0, k); uint8x16_t v1 = vaeseq_u8(ctr1, k);
@@ -146,26 +166,23 @@ public:
         uint8x16_t v4 = vaeseq_u8(ctr4, k); uint8x16_t v5 = vaeseq_u8(ctr5, k);
         uint8x16_t v6 = vaeseq_u8(ctr6, k); uint8x16_t v7 = vaeseq_u8(ctr7, k);
 
-        // 💡 8개 블록에 대한 라운드 전개 매크로
-        #define AES_ROUND_8X_KS(idx) \
+        #define AES_ROUND_8X_KS_ARM(idx) \
             v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3); \
             v4 = vaesmcq_u8(v4); v5 = vaesmcq_u8(v5); v6 = vaesmcq_u8(v6); v7 = vaesmcq_u8(v7); \
             k = round_keys[idx]; \
             v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k); \
             v4 = vaeseq_u8(v4, k); v5 = vaeseq_u8(v5, k); v6 = vaeseq_u8(v6, k); v7 = vaeseq_u8(v7, k);
 
-        // AES-256: 13번의 aesenc 수행
-        AES_ROUND_8X_KS(1); AES_ROUND_8X_KS(2); AES_ROUND_8X_KS(3);
-        AES_ROUND_8X_KS(4); AES_ROUND_8X_KS(5); AES_ROUND_8X_KS(6);
-        AES_ROUND_8X_KS(7); AES_ROUND_8X_KS(8); AES_ROUND_8X_KS(9);
-        AES_ROUND_8X_KS(10); AES_ROUND_8X_KS(11); AES_ROUND_8X_KS(12);
-        AES_ROUND_8X_KS(13);
-
+        AES_ROUND_8X_KS_ARM(1); AES_ROUND_8X_KS_ARM(2); AES_ROUND_8X_KS_ARM(3);
+        AES_ROUND_8X_KS_ARM(4); AES_ROUND_8X_KS_ARM(5); AES_ROUND_8X_KS_ARM(6);
+        AES_ROUND_8X_KS_ARM(7); AES_ROUND_8X_KS_ARM(8); AES_ROUND_8X_KS_ARM(9);
+        AES_ROUND_8X_KS_ARM(10); AES_ROUND_8X_KS_ARM(11); AES_ROUND_8X_KS_ARM(12);
+        AES_ROUND_8X_KS_ARM(13);
+        
         v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3);
         v4 = vaesmcq_u8(v4); v5 = vaesmcq_u8(v5); v6 = vaesmcq_u8(v6); v7 = vaesmcq_u8(v7);
         k = round_keys[14];
-
-        // 💡 128바이트 버퍼에 연속으로 저장 (인라인 암호화에서 바이트 단위로 뽑아 쓰기 위함)
+        
         vst1q_u8(out_ks,       veorq_u8(v0, k));
         vst1q_u8(out_ks + 16,  veorq_u8(v1, k));
         vst1q_u8(out_ks + 32,  veorq_u8(v2, k));
@@ -174,11 +191,14 @@ public:
         vst1q_u8(out_ks + 80,  veorq_u8(v5, k));
         vst1q_u8(out_ks + 96,  veorq_u8(v6, k));
         vst1q_u8(out_ks + 112, veorq_u8(v7, k));
+        #undef AES_ROUND_8X_KS_ARM
     }
 
-    // =====================================================================
-    // 0. [Init] 초기 설정 (Key Caching 및 AES-256 확장 적용)
-    // =====================================================================
+    inline __attribute__((always_inline)) void accumulate_gmac(const uint8_t* ct_block) {
+        uint8x16_t ct = vld1q_u8(ct_block);
+        current_hash = gf_mul_arm(veorq_u8(current_hash, ct), hash_key);
+    }
+
     void init(const uint8_t* key, const uint8_t* iv) {
         bool key_changed = (!is_key_cached) || (memcmp(cached_key, key, 32) != 0);
 
@@ -186,7 +206,6 @@ public:
             memcpy(cached_key, key, 32);
             is_key_cached = true;
 
-            // 🚀 AES-256 Key Expansion (ARM)
             static const uint8_t sbox[256] = {
                 0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
                 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -228,7 +247,6 @@ public:
                     temp[2] = sbox[temp[2]];
                     temp[3] = sbox[temp[3]];
                 }
-                
                 for (int j = 0; j < 4; ++j) {
                     expanded_key[bytes_gen] = expanded_key[bytes_gen - 32] ^ temp[j];
                     bytes_gen++;
@@ -241,14 +259,24 @@ public:
 
             alignas(16) uint8_t zero_bytes[16] = {0};
             uint8x16_t zero_block = vld1q_u8(zero_bytes);
-            hash_key = aes256_encrypt_arm(zero_block);
-            hash_key2 = gf_mul_arm(hash_key, hash_key);
-            hash_key3 = gf_mul_arm(hash_key2, hash_key);
-            hash_key4 = gf_mul_arm(hash_key3, hash_key);
-            hash_key5 = gf_mul_arm(hash_key4, hash_key);
-            hash_key6 = gf_mul_arm(hash_key5, hash_key);
-            hash_key7 = gf_mul_arm(hash_key6, hash_key);
-            hash_key8 = gf_mul_arm(hash_key7, hash_key);
+            
+            uint8x16_t hk = aes256_encrypt_arm(zero_block);
+            uint8x16_t hk2 = gf_mul_internal(hk, hk);
+            uint8x16_t hk3 = gf_mul_internal(hk2, hk);
+            uint8x16_t hk4 = gf_mul_internal(hk3, hk);
+            uint8x16_t hk5 = gf_mul_internal(hk4, hk);
+            uint8x16_t hk6 = gf_mul_internal(hk5, hk);
+            uint8x16_t hk7 = gf_mul_internal(hk6, hk);
+            uint8x16_t hk8 = gf_mul_internal(hk7, hk);
+
+            hash_key  = vrbitq_u8(hk);
+            hash_key2 = vrbitq_u8(hk2);
+            hash_key3 = vrbitq_u8(hk3);
+            hash_key4 = vrbitq_u8(hk4);
+            hash_key5 = vrbitq_u8(hk5);
+            hash_key6 = vrbitq_u8(hk6);
+            hash_key7 = vrbitq_u8(hk7);
+            hash_key8 = vrbitq_u8(hk8);
         }
 
         alignas(16) uint8_t j0_bytes[16] = {0};
@@ -278,16 +306,31 @@ public:
     }
 
     inline __attribute__((always_inline)) void process_tail_fused(const uint8_t* src, uint8_t* dest, size_t len) {
+
         if (len == 0) return;
-        alignas(16) uint8_t t_in[16] = {0}, t_out[16] = {0};
+
+        alignas(16) uint8_t t_in[16] = {0};
         memcpy(t_in, src, len);
 
         uint8x16_t ks = aes256_encrypt_arm(ctr_block);
-        uint8x16_t ct = veorq_u8(vld1q_u8(t_in), ks);
-        vst1q_u8(t_out, ct);
+        uint8x16_t ct_full = veorq_u8(vld1q_u8(t_in), ks);
+
+        alignas(16) uint8_t t_out[16];
+        vst1q_u8(t_out, ct_full);
         memcpy(dest, t_out, len);
-        for(size_t i=len; i<16; ++i) t_out[i] = 0;
-        current_hash = gf_mul_arm(veorq_u8(current_hash, vld1q_u8(t_out)), hash_key);
+
+        static const uint8_t mask_table[32] = {
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // 상위 16바이트는 1 (살릴 부분)
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // 하위 16바이트는 0 (지울 부분)
+        };
+
+        uint8x16_t mask = vld1q_u8(mask_table + 16 - len); 
+        
+        uint8x16_t ct_padded = vandq_u8(ct_full, mask); 
+
+        current_hash = gf_mul_arm(veorq_u8(current_hash, ct_padded), hash_key);
         increment_counter_arm();
     }
 
@@ -295,7 +338,7 @@ public:
         if (len == 0) return;
         alignas(16) uint8_t t_in[16] = {0};
         memcpy(t_in, aad, len);
-
+        
         uint8x16_t a = vld1q_u8(t_in);
         current_hash = gf_mul_arm(veorq_u8(current_hash, a), hash_key);
     }
@@ -307,7 +350,6 @@ public:
         uint8x16_t ks = aes256_encrypt_arm(ctr_block);
         uint8x16_t pt = veorq_u8(ct, ks);
         vst1q_u8(dest, pt);
-        
         increment_counter_arm();
     }
 
@@ -315,24 +357,19 @@ public:
         if (len == 0) return;
         alignas(16) uint8_t t_in[16] = {0}, t_out[16] = {0};
         memcpy(t_in, src, len);
-
+        
         uint8x16_t ct = vld1q_u8(t_in);
         current_hash = gf_mul_arm(veorq_u8(current_hash, ct), hash_key);
         
         uint8x16_t ks = aes256_encrypt_arm(ctr_block);
         uint8x16_t pt = veorq_u8(ct, ks);
         vst1q_u8(t_out, pt);
-        
         memcpy(dest, t_out, len);
         increment_counter_arm();
     }
 
-    // =====================================================================
-    // 64바이트 병렬 처리 (AES-256 특화 14라운드 및 32-bit $inc_{32}$ 병렬 생성)
-    // =====================================================================
     inline __attribute__((always_inline)) void process_64bytes_fused(const uint8_t* src, uint8_t* dest) {
         uint8x16_t ctr0 = ctr_block;
-
         uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
         uint8x16_t ctr2 = INC_ARM_CTR32(ctr0, 2);
         uint8x16_t ctr3 = INC_ARM_CTR32(ctr0, 3);
@@ -349,7 +386,6 @@ public:
             k = round_keys[idx]; \
             v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k);
 
-        // 🚀 AES-256: 13번의 aes/aesmc 수행
         AES_ROUND_4X_ARM(1); AES_ROUND_4X_ARM(2); AES_ROUND_4X_ARM(3);
         AES_ROUND_4X_ARM(4); AES_ROUND_4X_ARM(5); AES_ROUND_4X_ARM(6);
         AES_ROUND_4X_ARM(7); AES_ROUND_4X_ARM(8); AES_ROUND_4X_ARM(9);
@@ -358,6 +394,7 @@ public:
         
         v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3);
         k = round_keys[14];
+        
         uint8x16_t ks0 = veorq_u8(v0, k);
         uint8x16_t ks1 = veorq_u8(v1, k);
         uint8x16_t ks2 = veorq_u8(v2, k);
@@ -373,41 +410,42 @@ public:
         uint8x16_t ct2 = veorq_u8(pt2, ks2);
         uint8x16_t ct3 = veorq_u8(pt3, ks3);
 
-        // 🚀 [캐시 최적화] Non-Temporal (Streaming) Store
-        // L3 캐시(2MB)를 우회하여 DRAM으로 직행, OS 및 ROS2 필수 데이터의 캐시 방출(Eviction) 방지
-        
-        uint64x2_t ct0_64 = vreinterpretq_u64_u8(ct0);
-        __builtin_nontemporal_store(vgetq_lane_u64(ct0_64, 0), (uint64_t*)(dest));
-        __builtin_nontemporal_store(vgetq_lane_u64(ct0_64, 1), (uint64_t*)(dest + 8));
+        vst1q_u8(dest, ct0);
+        vst1q_u8(dest + 16, ct1);
+        vst1q_u8(dest + 32, ct2);
+        vst1q_u8(dest + 48, ct3);
 
-        uint64x2_t ct1_64 = vreinterpretq_u64_u8(ct1);
-        __builtin_nontemporal_store(vgetq_lane_u64(ct1_64, 0), (uint64_t*)(dest + 16));
-        __builtin_nontemporal_store(vgetq_lane_u64(ct1_64, 1), (uint64_t*)(dest + 24));
+        uint64x2_t sum_lo = vdupq_n_u64(0);
+        uint64x2_t sum_hi = vdupq_n_u64(0);
+        uint64x2_t sum_mid = vdupq_n_u64(0);
 
-        uint64x2_t ct2_64 = vreinterpretq_u64_u8(ct2);
-        __builtin_nontemporal_store(vgetq_lane_u64(ct2_64, 0), (uint64_t*)(dest + 32));
-        __builtin_nontemporal_store(vgetq_lane_u64(ct2_64, 1), (uint64_t*)(dest + 40));
+        PMULL_ACCUMULATE_STD(veorq_u8(current_hash, ct0), hash_key4, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct1, hash_key3, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct2, hash_key2, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct3, hash_key,  sum_lo, sum_hi, sum_mid);
 
-        uint64x2_t ct3_64 = vreinterpretq_u64_u8(ct3);
-        __builtin_nontemporal_store(vgetq_lane_u64(ct3_64, 0), (uint64_t*)(dest + 48));
-        __builtin_nontemporal_store(vgetq_lane_u64(ct3_64, 1), (uint64_t*)(dest + 56));
+        sum_mid = veorq_u64(sum_mid, sum_lo);
+        sum_mid = veorq_u64(sum_mid, sum_hi);
 
-        uint8x16_t t0 = veorq_u8(current_hash, ct0);
-        
-        uint8x16_t h0 = gf_mul_arm(t0, hash_key4);
-        uint8x16_t h1 = gf_mul_arm(ct1, hash_key3);
-        uint8x16_t h2 = gf_mul_arm(ct2, hash_key2);
-        uint8x16_t h3 = gf_mul_arm(ct3, hash_key);
-        
-        current_hash = veorq_u8(veorq_u8(h0, h1), veorq_u8(h2, h3));
+        uint64_t z0 = vgetq_lane_u64(sum_lo, 0);
+        uint64_t z1 = vgetq_lane_u64(sum_lo, 1) ^ vgetq_lane_u64(sum_mid, 0);
+        uint64_t z2 = vgetq_lane_u64(sum_hi, 0) ^ vgetq_lane_u64(sum_mid, 1);
+        uint64_t z3 = vgetq_lane_u64(sum_hi, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        current_hash = vrbitq_u8(vreinterpretq_u8_u64(res));
+
+        #undef AES_ROUND_4X_ARM
     }
 
-    // =====================================================================
-    // 🚀 128바이트 병렬 처리 (8-Way Unrolling + Delayed Reduction + LDP/STP 최적화)
-    // =====================================================================
     inline __attribute__((always_inline)) void process_128bytes_fused_arm(const uint8_t* src, uint8_t* dest) {
         uint8x16_t ctr0 = ctr_block;
-        
         uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
         uint8x16_t ctr2 = INC_ARM_CTR32(ctr0, 2);
         uint8x16_t ctr3 = INC_ARM_CTR32(ctr0, 3);
@@ -430,7 +468,6 @@ public:
             v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k); \
             v4 = vaeseq_u8(v4, k); v5 = vaeseq_u8(v5, k); v6 = vaeseq_u8(v6, k); v7 = vaeseq_u8(v7, k);
 
-        // AES-256 13라운드 처리
         AES_ROUND_8X_ARM(1); AES_ROUND_8X_ARM(2); AES_ROUND_8X_ARM(3);
         AES_ROUND_8X_ARM(4); AES_ROUND_8X_ARM(5); AES_ROUND_8X_ARM(6);
         AES_ROUND_8X_ARM(7); AES_ROUND_8X_ARM(8); AES_ROUND_8X_ARM(9);
@@ -446,7 +483,6 @@ public:
         uint8x16_t ks4 = veorq_u8(v4, k); uint8x16_t ks5 = veorq_u8(v5, k);
         uint8x16_t ks6 = veorq_u8(v6, k); uint8x16_t ks7 = veorq_u8(v7, k);
 
-        // 💡 64바이트씩 청크 단위 로드 (LDP 유도)
         uint8x16x4_t pt_blk0 = vld1q_u8_x4(src);
         uint8x16x4_t pt_blk1 = vld1q_u8_x4(src + 64);
 
@@ -455,46 +491,46 @@ public:
         uint8x16_t ct4 = veorq_u8(pt_blk1.val[0], ks4); uint8x16_t ct5 = veorq_u8(pt_blk1.val[1], ks5);
         uint8x16_t ct6 = veorq_u8(pt_blk1.val[2], ks6); uint8x16_t ct7 = veorq_u8(pt_blk1.val[3], ks7);
 
-        // 💡 Non-temporal Store 루프 전개 (L3 캐시 우회)
-        uint8x16_t cts[8] = {ct0, ct1, ct2, ct3, ct4, ct5, ct6, ct7};
-        for(int i = 0; i < 8; ++i) {
-            uint64x2_t ct_64 = vreinterpretq_u64_u8(cts[i]);
-            __builtin_nontemporal_store(vgetq_lane_u64(ct_64, 0), (uint64_t*)(dest + i*16));
-            __builtin_nontemporal_store(vgetq_lane_u64(ct_64, 1), (uint64_t*)(dest + i*16 + 8));
-        }
+        vst1q_u8(dest, ct0);
+        vst1q_u8(dest + 16, ct1);
+        vst1q_u8(dest + 32, ct2);
+        vst1q_u8(dest + 48, ct3);
+        vst1q_u8(dest + 64, ct4);
+        vst1q_u8(dest + 80, ct5);
+        vst1q_u8(dest + 96, ct6);
+        vst1q_u8(dest + 112, ct7);
 
-        // 💡 GHASH 지연 다항식 환원 (Delayed Reduction)
-        uint64x2_t sum00 = vdupq_n_u64(0);
-        uint64x2_t sum11 = vdupq_n_u64(0);
-        uint64x2_t sum01 = vdupq_n_u64(0);
+        uint64x2_t sum_lo = vdupq_n_u64(0);
+        uint64x2_t sum_hi = vdupq_n_u64(0);
+        uint64x2_t sum_mid = vdupq_n_u64(0);
 
-        // $(C_1 \oplus Hash) \cdot H^8$
-        PMULL_ACCUMULATE(veorq_u8(current_hash, ct0), hash_key8, sum00, sum11, sum01);
-        
-        // $C_2 \cdot H^7$ ~ $C_8 \cdot H^1$
-        PMULL_ACCUMULATE(ct1, hash_key7, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct2, hash_key6, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct3, hash_key5, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct4, hash_key4, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct5, hash_key3, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct6, hash_key2, sum00, sum11, sum01);
-        PMULL_ACCUMULATE(ct7, hash_key,  sum00, sum11, sum01);
+        PMULL_ACCUMULATE_STD(veorq_u8(current_hash, ct0), hash_key8, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct1, hash_key7, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct2, hash_key6, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct3, hash_key5, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct4, hash_key4, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct5, hash_key3, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct6, hash_key2, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct7, hash_key,  sum_lo, sum_hi, sum_mid);
 
-        // 단 1번의 환원(Reduction) 실행
-        uint64x2_t mid = veorq_u64(veorq_u64(sum01, sum00), sum11);
-        uint64x2_t r_low = veorq_u64(sum00, vextq_u64(vdupq_n_u64(0), mid, 1));
-        uint64x2_t r_high = veorq_u64(sum11, vextq_u64(mid, vdupq_n_u64(0), 1));
+        sum_mid = veorq_u64(sum_mid, sum_lo);
+        sum_mid = veorq_u64(sum_mid, sum_hi);
+
+        uint64_t z0 = vgetq_lane_u64(sum_lo, 0);
+        uint64_t z1 = vgetq_lane_u64(sum_lo, 1) ^ vgetq_lane_u64(sum_mid, 0);
+        uint64_t z2 = vgetq_lane_u64(sum_hi, 0) ^ vgetq_lane_u64(sum_mid, 1);
+        uint64_t z3 = vgetq_lane_u64(sum_hi, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        current_hash = vrbitq_u8(vreinterpretq_u8_u64(res));
         
-        uint64x2_t tmp = veorq_u64(r_low, vshlq_n_u64(r_low, 1));
-        tmp = veorq_u64(tmp, vshlq_n_u64(tmp, 2));
-        tmp = veorq_u64(tmp, vshlq_n_u64(tmp, 7));
-        r_low = veorq_u64(r_low, tmp);
-        
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 63));
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 62));
-        r_high = veorq_u64(r_high, vshrq_n_u64(r_low, 57));
-        
-        current_hash = vreinterpretq_u8_u64(r_high);
+        #undef AES_ROUND_8X_ARM
     }
 
     inline __attribute__((always_inline)) void decrypt_64bytes_fused(const uint8_t* src, uint8_t* dest) {
@@ -503,14 +539,31 @@ public:
         uint8x16_t ct2 = vld1q_u8(src + 32);
         uint8x16_t ct3 = vld1q_u8(src + 48);
 
-        uint8x16_t t0 = veorq_u8(current_hash, ct0);
-        
-        uint8x16_t h0 = gf_mul_arm(t0, hash_key4);
-        uint8x16_t h1 = gf_mul_arm(ct1, hash_key3);
-        uint8x16_t h2 = gf_mul_arm(ct2, hash_key2);
-        uint8x16_t h3 = gf_mul_arm(ct3, hash_key);
-        
-        current_hash = veorq_u8(veorq_u8(h0, h1), veorq_u8(h2, h3));
+        uint64x2_t sum_lo = vdupq_n_u64(0);
+        uint64x2_t sum_hi = vdupq_n_u64(0);
+        uint64x2_t sum_mid = vdupq_n_u64(0);
+
+        PMULL_ACCUMULATE_STD(veorq_u8(current_hash, ct0), hash_key4, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct1, hash_key3, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct2, hash_key2, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct3, hash_key,  sum_lo, sum_hi, sum_mid);
+
+        sum_mid = veorq_u64(sum_mid, sum_lo);
+        sum_mid = veorq_u64(sum_mid, sum_hi);
+
+        uint64_t z0 = vgetq_lane_u64(sum_lo, 0);
+        uint64_t z1 = vgetq_lane_u64(sum_lo, 1) ^ vgetq_lane_u64(sum_mid, 0);
+        uint64_t z2 = vgetq_lane_u64(sum_hi, 0) ^ vgetq_lane_u64(sum_mid, 1);
+        uint64_t z3 = vgetq_lane_u64(sum_hi, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        current_hash = vrbitq_u8(vreinterpretq_u8_u64(res));
 
         uint8x16_t ctr0 = ctr_block;
         uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
@@ -524,12 +577,16 @@ public:
         uint8x16_t v2 = vaeseq_u8(ctr2, k);
         uint8x16_t v3 = vaeseq_u8(ctr3, k);
 
-        // 🚀 AES-256: 13번의 aes/aesmc 수행
-        AES_ROUND_4X_ARM(1); AES_ROUND_4X_ARM(2); AES_ROUND_4X_ARM(3);
-        AES_ROUND_4X_ARM(4); AES_ROUND_4X_ARM(5); AES_ROUND_4X_ARM(6);
-        AES_ROUND_4X_ARM(7); AES_ROUND_4X_ARM(8); AES_ROUND_4X_ARM(9);
-        AES_ROUND_4X_ARM(10); AES_ROUND_4X_ARM(11); AES_ROUND_4X_ARM(12);
-        AES_ROUND_4X_ARM(13);
+        #define AES_ROUND_4X_DEC_ARM(idx) \
+            v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3); \
+            k = round_keys[idx]; \
+            v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k);
+
+        AES_ROUND_4X_DEC_ARM(1); AES_ROUND_4X_DEC_ARM(2); AES_ROUND_4X_DEC_ARM(3);
+        AES_ROUND_4X_DEC_ARM(4); AES_ROUND_4X_DEC_ARM(5); AES_ROUND_4X_DEC_ARM(6);
+        AES_ROUND_4X_DEC_ARM(7); AES_ROUND_4X_DEC_ARM(8); AES_ROUND_4X_DEC_ARM(9);
+        AES_ROUND_4X_DEC_ARM(10); AES_ROUND_4X_DEC_ARM(11); AES_ROUND_4X_DEC_ARM(12);
+        AES_ROUND_4X_DEC_ARM(13);
         
         v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3);
         k = round_keys[14];
@@ -543,15 +600,112 @@ public:
         vst1q_u8(dest + 16, pt1);
         vst1q_u8(dest + 32, pt2);
         vst1q_u8(dest + 48, pt3);
+        #undef AES_ROUND_4X_DEC_ARM
+    }
+
+    inline __attribute__((always_inline)) void decrypt_128bytes_fused_arm(const uint8_t* src, uint8_t* dest) {
+        uint8x16x4_t ct_blk0 = vld1q_u8_x4(src);
+        uint8x16x4_t ct_blk1 = vld1q_u8_x4(src + 64);
+
+        uint8x16_t ct0 = ct_blk0.val[0]; uint8x16_t ct1 = ct_blk0.val[1];
+        uint8x16_t ct2 = ct_blk0.val[2]; uint8x16_t ct3 = ct_blk0.val[3];
+        uint8x16_t ct4 = ct_blk1.val[0]; uint8x16_t ct5 = ct_blk1.val[1];
+        uint8x16_t ct6 = ct_blk1.val[2]; uint8x16_t ct7 = ct_blk1.val[3];
+
+        uint64x2_t sum_lo = vdupq_n_u64(0);
+        uint64x2_t sum_hi = vdupq_n_u64(0);
+        uint64x2_t sum_mid = vdupq_n_u64(0);
+
+        PMULL_ACCUMULATE_STD(veorq_u8(current_hash, ct0), hash_key8, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct1, hash_key7, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct2, hash_key6, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct3, hash_key5, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct4, hash_key4, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct5, hash_key3, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct6, hash_key2, sum_lo, sum_hi, sum_mid);
+        PMULL_ACCUMULATE_STD(ct7, hash_key,  sum_lo, sum_hi, sum_mid);
+
+        sum_mid = veorq_u64(sum_mid, sum_lo);
+        sum_mid = veorq_u64(sum_mid, sum_hi);
+
+        uint64_t z0 = vgetq_lane_u64(sum_lo, 0);
+        uint64_t z1 = vgetq_lane_u64(sum_lo, 1) ^ vgetq_lane_u64(sum_mid, 0);
+        uint64_t z2 = vgetq_lane_u64(sum_hi, 0) ^ vgetq_lane_u64(sum_mid, 1);
+        uint64_t z3 = vgetq_lane_u64(sum_hi, 1);
+
+        z1 ^= z3 ^ (z3 << 1) ^ (z3 << 2) ^ (z3 << 7);
+        z2 ^= (z3 >> 63) ^ (z3 >> 62) ^ (z3 >> 57);
+
+        z0 ^= z2 ^ (z2 << 1) ^ (z2 << 2) ^ (z2 << 7);
+        z1 ^= (z2 >> 63) ^ (z2 >> 62) ^ (z2 >> 57);
+
+        uint64x2_t res = vcombine_u64(vcreate_u64(z0), vcreate_u64(z1));
+        current_hash = vrbitq_u8(vreinterpretq_u8_u64(res));
+
+        uint8x16_t ctr0 = ctr_block;
+        uint8x16_t ctr1 = INC_ARM_CTR32(ctr0, 1);
+        uint8x16_t ctr2 = INC_ARM_CTR32(ctr0, 2);
+        uint8x16_t ctr3 = INC_ARM_CTR32(ctr0, 3);
+        uint8x16_t ctr4 = INC_ARM_CTR32(ctr0, 4);
+        uint8x16_t ctr5 = INC_ARM_CTR32(ctr0, 5);
+        uint8x16_t ctr6 = INC_ARM_CTR32(ctr0, 6);
+        uint8x16_t ctr7 = INC_ARM_CTR32(ctr0, 7);
+        ctr_block = INC_ARM_CTR32(ctr0, 8);
+
+        uint8x16_t k = round_keys[0];
+        uint8x16_t v0 = vaeseq_u8(ctr0, k); uint8x16_t v1 = vaeseq_u8(ctr1, k);
+        uint8x16_t v2 = vaeseq_u8(ctr2, k); uint8x16_t v3 = vaeseq_u8(ctr3, k);
+        uint8x16_t v4 = vaeseq_u8(ctr4, k); uint8x16_t v5 = vaeseq_u8(ctr5, k);
+        uint8x16_t v6 = vaeseq_u8(ctr6, k); uint8x16_t v7 = vaeseq_u8(ctr7, k);
+
+        #define AES_ROUND_8X_DEC_ARM(idx) \
+            v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3); \
+            v4 = vaesmcq_u8(v4); v5 = vaesmcq_u8(v5); v6 = vaesmcq_u8(v6); v7 = vaesmcq_u8(v7); \
+            k = round_keys[idx]; \
+            v0 = vaeseq_u8(v0, k); v1 = vaeseq_u8(v1, k); v2 = vaeseq_u8(v2, k); v3 = vaeseq_u8(v3, k); \
+            v4 = vaeseq_u8(v4, k); v5 = vaeseq_u8(v5, k); v6 = vaeseq_u8(v6, k); v7 = vaeseq_u8(v7, k);
+
+        AES_ROUND_8X_DEC_ARM(1); AES_ROUND_8X_DEC_ARM(2); AES_ROUND_8X_DEC_ARM(3);
+        AES_ROUND_8X_DEC_ARM(4); AES_ROUND_8X_DEC_ARM(5); AES_ROUND_8X_DEC_ARM(6);
+        AES_ROUND_8X_DEC_ARM(7); AES_ROUND_8X_DEC_ARM(8); AES_ROUND_8X_DEC_ARM(9);
+        AES_ROUND_8X_DEC_ARM(10); AES_ROUND_8X_DEC_ARM(11); AES_ROUND_8X_DEC_ARM(12);
+        AES_ROUND_8X_DEC_ARM(13);
+        
+        v0 = vaesmcq_u8(v0); v1 = vaesmcq_u8(v1); v2 = vaesmcq_u8(v2); v3 = vaesmcq_u8(v3);
+        v4 = vaesmcq_u8(v4); v5 = vaesmcq_u8(v5); v6 = vaesmcq_u8(v6); v7 = vaesmcq_u8(v7);
+        k = round_keys[14];
+
+        uint8x16_t pt0 = veorq_u8(ct0, veorq_u8(v0, k));
+        uint8x16_t pt1 = veorq_u8(ct1, veorq_u8(v1, k));
+        uint8x16_t pt2 = veorq_u8(ct2, veorq_u8(v2, k));
+        uint8x16_t pt3 = veorq_u8(ct3, veorq_u8(v3, k));
+        uint8x16_t pt4 = veorq_u8(ct4, veorq_u8(v4, k));
+        uint8x16_t pt5 = veorq_u8(ct5, veorq_u8(v5, k));
+        uint8x16_t pt6 = veorq_u8(ct6, veorq_u8(v6, k));
+        uint8x16_t pt7 = veorq_u8(ct7, veorq_u8(v7, k));
+
+        vst1q_u8(dest, pt0);
+        vst1q_u8(dest + 16, pt1);
+        vst1q_u8(dest + 32, pt2);
+        vst1q_u8(dest + 48, pt3);
+        vst1q_u8(dest + 64, pt4);
+        vst1q_u8(dest + 80, pt5);
+        vst1q_u8(dest + 96, pt6);
+        vst1q_u8(dest + 112, pt7);
+
+        #undef AES_ROUND_8X_DEC_ARM
     }
 
     inline __attribute__((always_inline)) void finalize(size_t aad_len, size_t payload_len, uint8_t* out_tag) {
-        alignas(16) uint64_t len_blk[2] = {
-            __builtin_bswap64((uint64_t)aad_len * 8), 
-            __builtin_bswap64((uint64_t)payload_len * 8)
-        };
-
-        current_hash = gf_mul_arm(veorq_u8(current_hash, vld1q_u8((uint8_t*)len_blk)), hash_key);
+        alignas(16) uint8_t len_blk[16] = {0};
+        uint64_t al = __builtin_bswap64((uint64_t)aad_len * 8);
+        uint64_t pl = __builtin_bswap64((uint64_t)payload_len * 8);
+        memcpy(len_blk, &al, 8);
+        memcpy(len_blk + 8, &pl, 8);
+        
+        uint8x16_t len_vec = vld1q_u8(len_blk); 
+        current_hash = gf_mul_arm(veorq_u8(current_hash, len_vec), hash_key);
+        
         vst1q_u8(out_tag, veorq_u8(current_hash, tag_mask));
     }
 
@@ -562,9 +716,10 @@ public:
         uint8x16_t comp = vld1q_u8(computed_tag);
         uint8x16_t exp = vld1q_u8(expected_tag);
         uint8x16_t diff_vec = veorq_u8(comp, exp);
-        
         uint64x2_t diff64 = vreinterpretq_u64_u8(diff_vec);
         uint64_t val = vgetq_lane_u64(diff64, 0) | vgetq_lane_u64(diff64, 1);
         return (val == 0);
     }
 };
+
+#endif // FUSED_CRYPTO_PAYLOAD_ARM_H

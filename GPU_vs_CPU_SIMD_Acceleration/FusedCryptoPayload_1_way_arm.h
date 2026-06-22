@@ -25,7 +25,6 @@ private:
         poly64x2_t pA = vreinterpretq_p64_u8(a);
         poly64x2_t pB = vreinterpretq_p64_u8(b);
         
-        // 1. Lane을 스칼라(poly64_t) 형태로 직접 추출
         poly64_t a_low = vgetq_lane_p64(pA, 0);
         poly64_t a_high = vgetq_lane_p64(pA, 1);
         poly64_t b_low = vgetq_lane_p64(pB, 0);
@@ -34,11 +33,9 @@ private:
         poly128_t m00 = vmull_p64(a_low, b_low);
         poly128_t m11 = vmull_p64(a_high, b_high);
         
-        // 2. uint64_t로 캐스팅하여 C++ 기본 비트 연산자(^)로 XOR 처리 후 복구
         poly64_t a01 = (poly64_t)((uint64_t)a_low ^ (uint64_t)a_high);
         poly64_t b01 = (poly64_t)((uint64_t)b_low ^ (uint64_t)b_high);
         
-        // 3. vmull_p64는 스칼라(poly64_t) 타입을 완벽히 허용함
         poly128_t m01 = vmull_p64(a01, b01);
         
         uint64x2_t m00_v = vreinterpretq_u64_p128(m00);
@@ -75,7 +72,6 @@ private:
         return veorq_u8(v, round_keys[14]);
     }
 
-    // 🚀 NIST SP 800-38D 규격에 맞춘 32-bit(inc32) 증가 로직
     inline __attribute__((always_inline)) void increment_counter_arm() {
         uint32x4_t ctr32 = vreinterpretq_u32_u8(vrev32q_u8(ctr_block));
         ctr32 = vsetq_lane_u32(vgetq_lane_u32(ctr32, 3) + 1, ctr32, 3);
