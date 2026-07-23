@@ -43,7 +43,7 @@ This baseline module isolates and benchmarks the pure cryptographic compute engi
 
 This module applies the custom CPU SIMD engines to the standard SROS2 network data plane for small-to-medium payloads (< 64KB). 
 
-By injecting a custom LLVM LTO pass (`CryptoFusionPass`), it intercepts the standard `encode_serialized_payload` IR at compile-time. It fuses Fast-CDR serialization and AES-GCM encryption into a **single, intermediate-buffer-free CPU cycle**. This "One-Shot" execution eliminates deep OpenSSL function call chains while generating fully compliant RTPS packets.
+By injecting a custom LLVM LTO pass (`CryptoFusionPass`), it strategically intercepts the underlying Fast-CDR serialization routines at the LLVM IR level during compile-time. It fuses this data serialization and AES-GCM encryption into a **single, intermediate-buffer-free CPU cycle**. This "One-Shot" execution eliminates deep OpenSSL function call chains while generating fully compliant RTPS packets.
 
 ### Performance Highlights
 * **Massive Throughput Gains:** The LTO Fusion 8-Way architecture drastically outperforms standard SROS2 across all payload sizes.
