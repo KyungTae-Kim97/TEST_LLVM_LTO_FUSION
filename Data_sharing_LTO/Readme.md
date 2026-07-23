@@ -43,3 +43,18 @@ A high-performance, hardware-aware secure architecture for ROS2 and FastDDS. Thi
 * **Throughput:** Achieved **1.4 GB/s** for 4MB payloads (an 81% improvement over Pure SROS2's 772 MB/s).
 * **Latency:** Processed 4MB payloads in **2.85ms**, drastically reducing the 5.19ms delay of standard SROS2 by eliminating redundant middleware network stack copies.
 * **Efficiency:** Achieved near-theoretical hardware limits, isolating pure cryptographic overhead to merely ~2.0ms compared to unsecured pure shared memory transfers.
+
+**Latency and Throughput Comparison Across Payload Sizes**  
+*(Pure SROS2 vs. Data-Sharing with LTO Fusion vs. Pure Data-Sharing without encryption)*
+
+| Configuration | Metric | 64KB | 128KB | 256KB | 512KB | 1MB | 2MB | 4MB |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Pure SROS2** | Avg Latency (ns) | 204,577 | 286,891 | 441,124 | 738,586 | 1,444,129 | 2,631,685 | 5,194,649 |
+| | P99 Latency (ns) | 510,816 | 840,416 | 1,493,760 | 1,153,152 | 3,388,768 | 3,659,360 | 10,350,560 |
+| | Throughput (Gbps) | 2.563 | 3.655 | 4.754 | 5.679 | 5.805 | 6.375 | 6.476 |
+| **Data-Sharing LTO Fusion** | Avg Latency (ns) | 82,180 | 112,021 | 201,898 | 379,045 | 729,778 | 1,432,878 | 2,845,151 |
+| | P99 Latency (ns) | 252,928 | 193,440 | 289,888 | 476,480 | 867,104 | 1,770,016 | 3,931,488 |
+| | Throughput (Gbps) | 6.380 | 9.361 | 10.387 | 11.065 | 11.492 | 11.710 | 11.777 |
+| **Pure Data-Sharing (No Encryption)** | Avg Latency (ns) | 76,290 | 98,492 | 122,761 | 174,015 | 247,221 | 434,698 | 810,467 |
+| | P99 Latency (ns) | 219,680 | 329,088 | 434,048 | 394,144 | 420,192 | 677,760 | 1,194,464 |
+| | Throughput (Gbps) | 6.872 | 10.646 | 17.083 | 24.104 | 33.932 | 38.588 | 41.405 |
